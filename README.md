@@ -1,0 +1,1064 @@
+# The Hidden Performance Cliff in pgvector: How PostgreSQL's Query Planner Breaks Filtered Vector Search at Scale
+
+*A deep investigation into why pgvector's filtered search degrades by 99% beyond a specific `top_k` threshold, and what you can do about it.*
+
+
+## Introduction
+
+PostgreSQL with pgvector has become a popular choice for vector similarity search. The appeal is obvious: use your existing PostgreSQL infrastructure, avoid managing a separate vector database, and leverage decades of SQL ecosystem maturity. For many use cases, this works well.
+
+But when I pushed pgvector to 2.5 million vectors, I discovered two distinct performance problems that are invisible at smaller scale:
+
+1. **Filtered search cliff**: Queries went from **83 milliseconds** to over **215 seconds**, a **2,500x degradation**, triggered by nothing more than changing the `LIMIT` clause from 10 to 50.
+2. **Hybrid search bottleneck**: Even at low `top_k`, hybrid search (vector + full-text via RRF) is consistently **3 to 4x slower** than pure vector search, with the full-text search component consuming over 90% of query time.
+
+This article walks through the technical investigation that uncovered the root cause of both problems, shows you the `EXPLAIN ANALYZE` evidence, and presents the workarounds I tested.
+
+---
+
+## The Setup
+
+### Infrastructure Overview
+
+I ran this investigation on a self-hosted PostgreSQL cluster on Azure Kubernetes Service (AKS), managed by the **CloudNativePG (CNPG) operator**. The architecture uses two separate AKS clusters: one dedicated to hosting the PostgreSQL database, and another dedicated to running the benchmark workloads.
+
+```mermaid
+graph TB
+    subgraph "CNPG AKS Cluster (aks-cnpg-pgvector)"
+        direction TB
+        subgraph "cnpg-system namespace"
+            OP[CNPG Operator]
+        end
+        subgraph "cnpg-pgvector namespace"
+            PG["PostgreSQL 18.1 + pgvector 0.8.1<br/>8 vCPU request / 16 vCPU limit<br/>32 GB / 64 GB RAM<br/>100 GB Premium SSD"]
+            LB[Azure Load Balancer :5432]
+        end
+        subgraph "monitoring namespace"
+            PROM[Prometheus + Grafana]
+        end
+        OP -->|manages| PG
+        PG --> LB
+        PG -.->|metrics :9187| PROM
+    end
+
+    subgraph "Benchmark Execution AKS Cluster"
+        BJ["Benchmark Jobs<br/>(Insert / Index / Retrieval)"]
+    end
+
+    BJ -->|TCP/5432| LB
+
+    subgraph "Azure Managed PostgreSQL"
+        RDB[(benchmark_results DB)]
+    end
+
+    BJ -->|stores results| RDB
+```
+
+**CNPG AKS Cluster (`aks-cnpg-pgvector`):**
+- **Node**: Azure `Standard_D16s_v3` (16 vCPUs, 64 GB RAM)
+- **Operator**: CloudNativePG (CNPG) v1.x, installed via Helm
+- **PostgreSQL**: 18.1 with pgvector 0.8.1
+- **Storage**: 100 GB Azure Premium SSD (`managed-csi-premium`)
+- **Monitoring**: Prometheus + Grafana dashboards for real-time CPU, memory, I/O, and query metrics
+
+**Benchmark Execution Cluster (`benchmark-execution-aks`):**
+- A separate AKS cluster running benchmark jobs as Kubernetes Jobs via Helm charts
+- Connects to the CNPG cluster over an Azure Load Balancer on port 5432
+- Results stored in an Azure Managed PostgreSQL instance for analysis
+
+### Setting Up the AKS Cluster
+
+The CNPG cluster runs on a dedicated AKS cluster with a single `Standard_D16s_v3` node to ensure the database has exclusive access to all 16 vCPUs and 64 GB of RAM:
+
+```bash
+# Create AKS cluster with a single D16s_v3 node
+export RESOURCE_GROUP="milvus-rg"
+export CLUSTER_NAME="aks-cnpg-pgvector"
+export LOCATION="northeurope"
+export NODE_VM_SIZE="Standard_D16s_v3"
+export ACR_NAME="benchmarkregistry504646de"
+
+az aks create \
+    --resource-group $RESOURCE_GROUP \
+    --name $CLUSTER_NAME \
+    --location $LOCATION \
+    --node-count 1 \
+    --node-vm-size $NODE_VM_SIZE \
+    --enable-managed-identity \
+    --generate-ssh-keys \
+    --network-plugin azure \
+    --network-policy azure \
+    --enable-addons monitoring \
+    --attach-acr $ACR_NAME
+
+# Get credentials
+az aks get-credentials \
+    --resource-group $RESOURCE_GROUP \
+    --name $CLUSTER_NAME \
+    --overwrite-existing
+```
+
+### Installing the CloudNativePG Operator
+
+CloudNativePG is a Kubernetes operator that manages the full lifecycle of PostgreSQL clusters through Custom Resource Definitions (CRDs). Instead of running a managed database service, you define your PostgreSQL cluster as a YAML manifest and the operator handles provisioning, failover, backup, and monitoring.
+
+```bash
+# Add the CNPG Helm repo and install the operator
+helm repo add cnpg https://cloudnative-pg.github.io/charts
+helm repo update
+
+kubectl create namespace cnpg-system
+helm install cnpg-operator cnpg/cloudnative-pg \
+    --namespace cnpg-system \
+    --set monitoring.podMonitorEnabled=false
+
+# Verify operator is running
+kubectl get pods -n cnpg-system
+# cnpg-cloudnative-pg-xxx   Running
+```
+
+### Building a Custom PostgreSQL + pgvector Image
+
+The standard CloudNativePG PostgreSQL image does not include pgvector, so I built a custom image based on the CNPG base:
+
+```dockerfile
+FROM ghcr.io/cloudnative-pg/postgresql:18.1-standard-trixie
+
+USER root
+RUN apt update \
+    && apt install -y gnupg postgresql-common apt-transport-https \
+       lsb-release wget build-essential git \
+    && /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y \
+    && apt update \
+    && apt install -y postgresql-18-pgvector \
+    && apt-get autoremove -y \
+    && rm -rf /var/lib/apt/lists/* /var/cache/* /var/log/*
+USER 26
+```
+
+```bash
+# Build and push to Azure Container Registry
+docker build -t $ACR_NAME.azurecr.io/postgresql-pgvector:18.1-pgvector \
+    -f infrastructure/cnpg-pgvector/Dockerfile .
+az acr login --name $ACR_NAME
+docker push $ACR_NAME.azurecr.io/postgresql-pgvector:18.1-pgvector
+```
+
+### Deploying the PostgreSQL Cluster via CRD
+
+The CNPG operator reads a Cluster CRD and creates the PostgreSQL pod with the specified configuration. Here is the CRD I used, with tuned PostgreSQL parameters for vector workloads:
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: ml-pgvector-benchmark
+  namespace: cnpg-pgvector
+spec:
+  instances: 1
+  imageName: benchmarkregistry504646de.azurecr.io/postgresql-pgvector:18.1-pgvector
+  postgresql:
+    parameters:
+      shared_buffers: "4GB"
+      effective_cache_size: "12GB"
+      work_mem: "256MB"
+      maintenance_work_mem: "1GB"
+      max_connections: "200"
+      random_page_cost: "1.1"
+      effective_io_concurrency: "200"
+      max_parallel_workers_per_gather: "4"
+      max_parallel_workers: "8"
+      # TCP keepalives to prevent Azure Load Balancer
+      # from dropping idle connections (4 min timeout)
+      tcp_keepalives_idle: "60"
+      tcp_keepalives_interval: "10"
+      tcp_keepalives_count: "6"
+  storage:
+    size: 100Gi
+    storageClass: managed-csi-premium
+  resources:
+    requests:
+      cpu: "8"
+      memory: "32Gi"
+    limits:
+      cpu: "16"
+      memory: "64Gi"
+  bootstrap:
+    initdb:
+      database: benchmark_vectors
+      owner: benchmark_user
+      postInitSQL:
+        - CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+```bash
+# Deploy the cluster
+kubectl create namespace cnpg-pgvector
+kubectl apply -f infrastructure/cnpg-pgvector/cluster.yaml
+
+# Watch it come up (takes 2-5 minutes)
+kubectl get cluster -n cnpg-pgvector -w
+```
+
+### Setting Up Prometheus and Grafana Monitoring
+
+To observe real-time CPU, memory, I/O, and PostgreSQL-specific metrics during benchmarks, I deployed the `kube-prometheus-stack` with persistent storage:
+
+```bash
+kubectl create namespace monitoring
+helm repo add prometheus-community \
+    https://prometheus-community.github.io/helm-charts
+helm repo update
+
+helm upgrade --install prometheus \
+    prometheus-community/kube-prometheus-stack \
+    --namespace monitoring \
+    -f infrastructure/cnpg-pgvector/monitoring/values-prometheus-grafana.yaml \
+    --wait --timeout 10m
+```
+
+CNPG exposes PostgreSQL metrics on port 9187 out of the box. I created a PodMonitor to tell Prometheus to scrape those metrics, and imported a custom Grafana dashboard for PostgreSQL-specific panels (cache hit ratio, active connections, WAL rate, lock contention):
+
+```bash
+# Apply custom metrics queries and PodMonitor
+kubectl apply -f infrastructure/cnpg-pgvector/monitoring/cnpg-extra-monitoring.yaml
+kubectl apply -f infrastructure/cnpg-pgvector/monitoring/cnpg-podmonitor.yaml
+
+# Import Grafana dashboard
+kubectl create configmap cnpg-pgvector-dashboard \
+    --namespace monitoring \
+    --from-file=cnpg-pgvector-overview.json=infrastructure/cnpg-pgvector/monitoring/dashboards/cnpg-pgvector-overview.json \
+    --dry-run=client -o yaml \
+    | kubectl label --local -f - grafana_dashboard=1 -o yaml \
+    | kubectl apply -f -
+
+# Access Grafana
+kubectl port-forward svc/prometheus-grafana -n monitoring 3000:80
+```
+
+### The Benchmark Engine Docker Image
+
+The benchmark suite itself is packaged as a Docker container built with `uv` for dependency management. It contains Python scripts for insert, index creation, and retrieval benchmarks, and runs as Kubernetes Jobs on the benchmark execution cluster:
+
+```dockerfile
+FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+WORKDIR /app
+ENV UV_COMPILE_BYTECODE=1
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-install-project
+COPY src/ ./src/
+COPY README.md .
+RUN mkdir -p /app/data
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
+ENV PATH="/app/.venv/bin:$PATH"
+CMD ["python", "--version"]
+```
+
+```bash
+# Build and push the benchmark engine image
+export TAG="v5.2.6-wot-8rep"
+docker build -t $ACR_NAME.azurecr.io/benchmark-engine:$TAG \
+    -f infrastructure/docker/Dockerfile .
+docker push $ACR_NAME.azurecr.io/benchmark-engine:$TAG
+```
+
+---
+
+## The Dataset
+
+The benchmark dataset contains **2.5 million text chunk embeddings** from the *Wheel of Time* (WoT) book series, consisting of 1,536-dimensional vectors generated from OpenAI's embedding model. Each row contains:
+
+- `id`: Primary key
+- `embedding`: A `vector(1536)` column
+- `content`: The original text chunk
+- `metadata`: A JSONB column containing `book_name`, `chunk_index`, and other fields
+
+The `metadata->>'book_name'` field has **16 distinct values** (one per book), with the smallest book having 63,945 rows (2.6% of total) and the largest having 209,226 rows (8.4%).
+
+### Data Ingestion: PostgreSQL COPY Binary Format
+
+For bulk loading 2.5 million vectors, I used PostgreSQL's COPY command with binary format, which is the recommended approach for large vector datasets. This avoids the overhead of text parsing and parameter binding that comes with standard INSERT statements.
+
+The key part of the insert script:
+
+```python
+with conn.cursor() as cur:
+    with cur.copy(
+        f"COPY {TABLE_NAME} (content, metadata, embedding) "
+        "FROM STDIN WITH (FORMAT BINARY)"
+    ) as copy:
+        copy.set_types(['text', 'jsonb', 'vector'])
+        for record in batch:
+            copy.write_row(record)
+```
+
+This approach achieves 10 to 50x faster ingestion compared to standard INSERT statements. The full 2.5 million row insert completed in approximately 27 minutes on this setup.
+
+### Index Creation
+
+Three indexes were created on the table using a dedicated index creation script:
+
+```python
+# 1. HNSW vector index for approximate nearest neighbor search
+cur.execute("SET maintenance_work_mem = '2GB';")
+cur.execute(f"""
+    CREATE INDEX ON {TABLE_NAME}
+    USING hnsw (embedding vector_cosine_ops)
+    WITH (m = 16, ef_construction = 64);
+""")
+
+# 2. B-tree expression index for metadata filtering
+cur.execute(f"""
+    CREATE INDEX ON {TABLE_NAME}
+    USING btree ((metadata->>'book_name'));
+""")
+
+# 3. GIN index for full-text search (hybrid queries)
+cur.execute(f"""
+    CREATE INDEX ON {TABLE_NAME}
+    USING gin (to_tsvector('english', content));
+""")
+```
+
+The HNSW index build on 2.5 million 1,536-dimensional vectors took approximately 4 hours and 45 minutes with `maintenance_work_mem` set to 2 GB. The B-tree and GIN indexes built much faster (seconds and minutes, respectively).
+
+---
+
+## The Benchmark
+
+Each benchmark runs as a Kubernetes Job deployed via Helm. The Helm values file defines the script to run, dataset configuration, and connection parameters:
+
+```yaml
+# retrieval-cnpg-pgvector-asyncpg.yaml
+command: ["python", "src/pgvector/03_retrieval_asyncpg.py"]
+env:
+  DATASET_SIZE: "2500000"
+  TABLE_NAME: "wot_chunks_2_5m"
+  CONCURRENCY_LEVELS: "1,2,4,8,16,32,50,100"
+  TOP_K_VALUES: "1,5,10,20,50,100"
+  BENCHMARK_NUM_QUERIES: "4373"
+  DATABASE_NAME_OVERRIDE: "PostgreSQL CNPG Self-Hosted"
+```
+
+```bash
+# Deploy a retrieval benchmark job
+kubectl config use-context benchmark-execution-aks
+
+helm install cnpg-pg-retrieval-asyncpg-wot-2m5 \
+    ./kube/charts/benchmark-engine \
+    -f kube/charts/benchmark-engine/examples/retrieval-cnpg-pgvector-asyncpg.yaml \
+    --set image.repository=$ACR_NAME.azurecr.io/$IMAGE_NAME \
+    --set image.tag=$TAG
+```
+
+The retrieval benchmark tests three search patterns at varying concurrency levels (1, 2, 4, 8, 16, 32, 50, 100 concurrent queries) and `top_k` values (1, 5, 10, 20, 50, 100):
+
+### 1. Vector Search (Pure ANN)
+
+```python
+query = f"""
+    SELECT id, 1 - (embedding <=> $1) AS similarity
+    FROM {TABLE_NAME}
+    ORDER BY embedding <=> $1
+    LIMIT {top_k}
+"""
+await conn.fetch(query, query_embedding)
+```
+
+### 2. Filtered Search (Vector + Metadata Filter)
+
+```python
+query = f"""
+    SELECT id, 1 - (embedding <=> $1) AS similarity
+    FROM {TABLE_NAME}
+    WHERE metadata->>'{filter_field}' = $2
+    ORDER BY embedding <=> $1
+    LIMIT {top_k}
+"""
+await conn.fetch(query, query_embedding, filter_value)
+```
+
+### 3. Hybrid Search (Vector + Full-Text via RRF)
+
+```python
+query = f"""
+    WITH vector_search AS (
+        SELECT id,
+               ROW_NUMBER() OVER (ORDER BY embedding <=> $1) as rank,
+               1 - (embedding <=> $1) as vector_similarity
+        FROM {TABLE_NAME}
+        LIMIT {vector_limit}
+    ),
+    text_search AS (
+        SELECT id,
+               ROW_NUMBER() OVER (ORDER BY ts_rank(
+                   to_tsvector('english', content),
+                   plainto_tsquery('english', $2)
+               ) DESC) as rank,
+               ts_rank(to_tsvector('english', content),
+                       plainto_tsquery('english', $2)) as text_score
+        FROM {TABLE_NAME}
+        WHERE to_tsvector('english', content)
+              @@ plainto_tsquery('english', $2)
+        LIMIT {vector_limit}
+    ),
+    rrf_scores AS (
+        SELECT COALESCE(v.id, t.id) as id,
+               (COALESCE(1.0 / (60 + v.rank), 0.0)
+              + COALESCE(1.0 / (60 + t.rank), 0.0)) as rrf_score
+        FROM vector_search v
+        FULL OUTER JOIN text_search t ON v.id = t.id
+    )
+    SELECT id, rrf_score as similarity
+    FROM rrf_scores
+    ORDER BY rrf_score DESC
+    LIMIT {top_k}
+"""
+```
+
+The benchmark driver uses Python's `asyncpg` with connection pooling and semaphore-based concurrency control. Each test scenario runs 4,373 queries using real embeddings sampled from the dataset.
+
+---
+
+## Understanding the Key PostgreSQL Concepts
+
+Before diving into the benchmark results and the performance cliff, it is important to understand the PostgreSQL internals involved. These concepts are essential to grasping why the problem occurs.
+
+### HNSW Index
+
+HNSW (Hierarchical Navigable Small Worlds) is a graph-based approximate nearest neighbor (ANN) index. pgvector implements it as a PostgreSQL access method. Instead of scanning every row, it traverses a multi-layer graph structure:
+
+```mermaid
+graph TD
+    subgraph "HNSW Graph Structure"
+        direction TB
+        subgraph "Layer 2 (Top - Sparse)"
+            A2((Node A))
+            D2((Node D))
+            A2 --- D2
+        end
+        subgraph "Layer 1 (Middle)"
+            A1((Node A))
+            B1((Node B))
+            D1((Node D))
+            F1((Node F))
+            A1 --- B1
+            A1 --- D1
+            B1 --- F1
+            D1 --- F1
+        end
+        subgraph "Layer 0 (Bottom - All Nodes)"
+            A0((A))
+            B0((B))
+            C0((C))
+            D0((D))
+            E0((E))
+            F0((F))
+            G0((G))
+            A0 --- B0
+            A0 --- C0
+            B0 --- C0
+            B0 --- F0
+            C0 --- D0
+            D0 --- E0
+            D0 --- G0
+            E0 --- F0
+            F0 --- G0
+        end
+    end
+    Q((Query Vector)) -.->|"1. Enter at top layer"| A2
+    A2 -.->|"2. Navigate down"| A1
+    A1 -.->|"3. Greedy search"| B1
+    B1 -.->|"4. Descend to bottom"| B0
+    B0 -.->|"5. Fine-grained search"| C0
+```
+
+The top layers have fewer, widely-spaced nodes for long-range navigation. The bottom layer contains all nodes for precise local search. Search starts from the top and descends, greedily moving toward the query vector at each layer.
+
+The key parameter is `ef_search` (default: 40), which controls how many candidate nodes are explored at the bottom layer. Higher values give better recall but slower search.
+
+When PostgreSQL uses the HNSW index for a filtered query, it traverses the graph, finds candidate rows, and then applies the `WHERE` clause as a **post-filter**, discarding non-matching rows. If a candidate does not match the filter, it is discarded, and the search continues deeper into the graph.
+
+### B-Tree Index
+
+A B-tree (balanced tree) is PostgreSQL's default index type. The expression index `CREATE INDEX ON table ((metadata->>'book_name'))` extracts the `book_name` value from the JSONB `metadata` column and indexes it in a B-tree. This allows PostgreSQL to efficiently find all rows matching a specific book name in logarithmic time.
+
+### Bitmap Heap Scan
+
+A Bitmap Heap Scan is a two-phase access method:
+
+```mermaid
+flowchart LR
+    subgraph "Phase 1: Bitmap Index Scan"
+        BT["B-Tree Index<br/>(metadata->>'book_name')"] --> BM["Bitmap<br/>(one bit per page)"]
+    end
+    subgraph "Phase 2: Bitmap Heap Scan"
+        BM --> HP["Fetch Heap Pages<br/>(table data)"]
+        HP --> RC["Recheck Condition<br/>on each row"]
+    end
+    RC --> OUT["63,945 matching rows"]
+```
+
+1. **Bitmap Index Scan**: Reads the B-tree index to build a bitmap, a bitset where each bit represents a table page (8 KB block). If any row on that page matches the condition, the bit is set.
+2. **Bitmap Heap Scan**: Reads the table pages corresponding to set bits, rechecking each row against the condition.
+
+This is efficient when many rows match (too many for a simple Index Scan, but not so many that a Sequential Scan would be faster). For "00. New Spring" with 63,945 matching rows spread across 50,137 heap blocks, it is a reasonable choice for the metadata filter alone. The problem is what comes **after** the Bitmap Heap Scan: brute-force distance computation on all 63,945 rows.
+
+### GIN Index and Full-Text Search
+
+A GIN (Generalized Inverted Index) is PostgreSQL's index for full-text search. The expression index `CREATE INDEX ON table USING gin (to_tsvector('english', content))` tokenizes the `content` column and builds an inverted index mapping each word (lexeme) to the list of rows containing it.
+
+The GIN index is extremely fast at answering the question "which rows contain this word?" using the `@@` operator. But it **cannot** answer "which rows contain this word, ranked by relevance, give me the top 20?" To rank results by `ts_rank()`, PostgreSQL must:
+
+1. Use the GIN index to find all matching row IDs
+2. Fetch every matching row from the heap (the actual table data)
+3. Compute `ts_rank()` on each row (which involves re-tokenizing the content)
+4. Sort all rows by rank
+5. Return the top N
+
+For a common keyword like "dragon" that appears in 76,198 rows out of 2.5 million, this means fetching and scoring 76,198 rows just to return the top 20. This architectural limitation becomes the dominant bottleneck in hybrid search, as we will see later in this article.
+
+### The Query Planner and Cost Model
+
+PostgreSQL's query planner (also called the optimizer) evaluates multiple possible execution strategies for every query and picks the one with the lowest estimated cost. The planner assigns numeric cost estimates to each plan node based on configurable parameters:
+
+- `seq_page_cost`: Cost of reading a page sequentially (default: 1.0)
+- `random_page_cost`: Cost of reading a random page (default: 4.0, we set 1.1 for SSD)
+- `cpu_tuple_cost`: Cost per row for processing (default: 0.01)
+- `cpu_operator_cost`: Cost per operator invocation (default: 0.0025)
+
+These costs are in arbitrary units but are internally consistent. The planner computes the total estimated cost for each possible plan and picks the cheapest one.
+
+The critical issue for our investigation: the cost of the `<=>` (cosine distance) operator on 1,536-dimensional vectors is treated the same as **any other operator** (`cpu_operator_cost = 0.0025`). In reality, computing cosine distance on 1,536-dimensional float32 vectors requires 1,536 floating-point multiplications and additions per invocation, making it thousands of times more expensive than comparing two scalar values. The planner has no way to know this.
+
+```mermaid
+flowchart TD
+    subgraph "Query Planner Decision"
+        Q["Filtered Vector Search Query<br/>WHERE book_name = 'X' ORDER BY distance LIMIT N"]
+        Q --> P["Planner estimates cost<br/>for each strategy"]
+        P --> SA["Strategy A:<br/>HNSW Index Scan + Post-Filter"]
+        P --> SB["Strategy B:<br/>B-Tree Index Scan + Brute-Force Sort"]
+        SA --> CA["Estimated cost rises<br/>steeply with LIMIT"]
+        SB --> CB["Estimated cost appears<br/>low (underestimates<br/>vector distance cost)"]
+        CA --> D{"Compare<br/>costs"}
+        CB --> D
+        D -->|"LIMIT <= ~40"| WIN_A["Choose Strategy A<br/>(HNSW - FAST)"]
+        D -->|"LIMIT > ~40"| WIN_B["Choose Strategy B<br/>(Brute-force - SLOW)"]
+    end
+
+    style WIN_A fill:#22c55e,color:#fff
+    style WIN_B fill:#ef4444,color:#fff
+```
+
+---
+
+## The Problem: Filtered Search Falls Off a Cliff
+
+Pure vector search worked well across all `top_k` values. But two other search patterns revealed significant problems. Filtered search showed a dramatic performance degradation at `top_k >= 50`, and hybrid search, while stable across `top_k` values, was consistently 3 to 4x slower than pure vector search at every data point:
+
+### Benchmark Results: pgvector CNPG (2.5M Vectors)
+
+| Search Type | top_k | Concurrency | Avg Latency (ms) | P99 Latency (ms) | QPS |
+|---|---|---|---|---|---|
+| **Vector Search** | 10 | 1 | 3.87 | 7.97 | 209.56 |
+| **Vector Search** | 10 | 50 | 12.41 | 164.53 | 1,728.87 |
+| **Vector Search** | 50 | 50 | 12.51 | 40.06 | 1,666.25 |
+| **Vector Search** | 100 | 100 | 22.28 | 76.02 | 1,697.39 |
+| **Filtered Search** | 10 | 1 | 3.66 | 6.52 | 220.83 |
+| **Filtered Search** | 10 | 50 | 12.26 | 154.01 | 1,755.72 |
+| **Filtered Search** | 20 | 50 | 10.93 | 33.09 | 1,812.04 |
+| **Filtered Search** | **50** | **1** | **44.25** | **2,422** | **21.88** |
+| **Filtered Search** | **50** | **50** | **1,915** | **22,628** | **24.85** |
+| **Filtered Search** | **100** | **100** | **3,629** | **45,629** | **24.57** |
+| **Hybrid Search** | 10 | 1 | 13.50 | 27.91 | 68.92 |
+| **Hybrid Search** | 50 | 50 | 50.72 | 183.88 | 264.24 |
+| **Hybrid Search** | 100 | 100 | 109.87 | 363.80 | 249.18 |
+
+The pattern is stark. Filtered search at `top_k = 20` with 50 concurrent queries: **10.93 ms** average, **1,812 QPS**. The same filtered search at `top_k = 50` with 50 concurrent queries: **1,915 ms** average, **24.85 QPS**. That is a **175x latency increase** and a **99% QPS drop** from one step in the `top_k` axis.
+
+Vector search shows no such cliff and scales smoothly across all `top_k` values. Hybrid search also has no `top_k`-dependent cliff, but notice something else: even at `top_k = 10` with a single query, hybrid search averages **13.50 ms** compared to vector search's **3.87 ms**. At `top_k = 100` with 100 concurrent queries, hybrid search delivers **249 QPS** while vector search delivers **1,697 QPS**. This consistent 3 to 4x performance gap is a separate problem that we will investigate after the filtered search deep-dive.
+
+At concurrency, the `top_k = 50` and `top_k = 100` filtered searches caused mass timeouts. The benchmark logs were filled with:
+
+```json
+{"idx": 3992, "timeout": 160.0, "event": "query_timed_out", "level": "warning"}
+```
+
+This was not a concurrency issue. Even a **single query** with `top_k = 50` took 44 ms on average, but with a **P99 of 2,422 ms**, meaning some queries took seconds while others triggered the catastrophic plan. Something fundamental had changed in how PostgreSQL executed the query.
+
+*Charts: see `doc/plots/article_filtered_search_cliff.png` for the visual representation of this cliff.*
+
+---
+
+## The Investigation: EXPLAIN ANALYZE Reveals the Truth
+
+To understand what was happening, I wrote a diagnostic script that runs the exact filtered search query at different `top_k` values using PostgreSQL's `EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)`. This shows the actual execution plan the query planner chose and the real runtime statistics.
+
+```python
+# Diagnostic query: same as the benchmark, wrapped in EXPLAIN ANALYZE
+query_sql = f"""
+    EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+    SELECT id, 1 - (embedding <=> %s::vector) AS similarity
+    FROM {TABLE_NAME}
+    WHERE metadata->>'book_name' = %s
+    ORDER BY embedding <=> %s::vector
+    LIMIT {top_k}
+"""
+rows = conn.execute(query_sql, (embedding, book_name, embedding)).fetchall()
+```
+
+### The Fast Path: top_k = 10
+
+```
+Limit (actual time=2.942..83.275 rows=8 loops=1)
+  Buffers: shared hit=1888 read=25
+  -> Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m
+       (actual time=2.940..83.267 rows=8 loops=1)
+     Filter: ((metadata ->> 'book_name') = '00. New Spring')
+     Rows Removed by Filter: 59
+     Index Searches: 0
+     Buffers: shared hit=1888 read=25
+Planning Time: 0.123 ms
+Execution Time: 83.308 ms
+```
+
+**What is happening here**: PostgreSQL is using the **HNSW vector index** (`wot_chunks_2_5m_embedding_idx`). It traverses the HNSW graph to find the nearest neighbors by vector distance, then applies the `book_name` filter as a post-filter, discarding non-matching rows. It found 8 matching rows after scanning 67 candidates (8 kept + 59 filtered out). Total: **83 ms**.
+
+This is the efficient path. The HNSW index does the heavy lifting, traversing a graph structure that can find approximate nearest neighbors in logarithmic time, and the metadata filter just removes a few non-matching results.
+
+### The Catastrophic Path: top_k = 50
+
+```
+Limit (actual time=215250.781..215250.793 rows=50 loops=1)
+  Buffers: shared hit=423773 read=137981
+  -> Sort (actual time=215250.778..215250.785 rows=50 loops=1)
+       Sort Key: (embedding <=> '[...]'::vector)
+       Sort Method: top-N heapsort  Memory: 31kB
+       Buffers: shared hit=423773 read=137981
+       -> Bitmap Heap Scan on wot_chunks_2_5m
+            (actual time=21.141..215129.736 rows=63945 loops=1)
+             Recheck Cond: ((metadata ->> 'book_name') = '00. New Spring')
+             Heap Blocks: exact=50137
+             Buffers: shared hit=423773 read=137981
+             -> Bitmap Index Scan on wot_chunks_2_5m_expr_idx
+                  (actual time=10.148..10.149 rows=63945 loops=1)
+                   Index Cond: ((metadata ->> 'book_name') = '00. New Spring')
+Planning Time: 0.120 ms
+Execution Time: 215251.037 ms
+```
+
+**What is happening here**: PostgreSQL completely abandoned the HNSW index. Instead, it executed a three-step plan:
+
+```mermaid
+flowchart TD
+    subgraph "The Catastrophic Plan (top_k=50)"
+        S1["Step 1: Bitmap Index Scan<br/>B-Tree on metadata->>'book_name'<br/>Finds all 63,945 matching row IDs<br/>Time: 10 ms"]
+        S2["Step 2: Bitmap Heap Scan<br/>Fetches all 63,945 rows from disk<br/>50,137 heap blocks, 561,754 buffer hits<br/>Reads 137,981 pages from disk"]
+        S3["Step 3: Sort<br/>Computes cosine distance on ALL 63,945 rows<br/>1,536 dimensions x 63,945 rows = brute force<br/>Time: ~215,000 ms"]
+        S4["Step 4: Limit<br/>Pick top 50 from sorted results"]
+
+        S1 --> S2 --> S3 --> S4
+    end
+
+    style S3 fill:#ef4444,color:#fff
+```
+
+1. **Bitmap Index Scan** on the B-tree `wot_chunks_2_5m_expr_idx`: finds all 63,945 row IDs matching `book_name = '00. New Spring'` in 10 ms
+2. **Bitmap Heap Scan**: fetches all 63,945 rows from disk (50,137 heap blocks, 561,754 buffer accesses)
+3. **Sort**: computes `embedding <=> query_vector` distance for **all 63,945 rows** using brute-force calculation, then sorts and picks the top 50
+
+Step 3 is the killer. Computing cosine distance on 1,536-dimensional vectors for 63,945 rows is pure CPU torture. That is where the 215 seconds went.
+
+---
+
+## Why Does the Query Planner Switch?
+
+For our filtered search query, the planner considers two main strategies:
+
+**Strategy A: HNSW Index Scan + Post-Filter**
+- Use the HNSW index to traverse the vector graph
+- For each candidate, check if `book_name` matches
+- Stop when `LIMIT` rows are found
+- Cost depends on: how deep into the graph it needs to go before finding enough matching rows
+
+**Strategy B: B-Tree Metadata Scan + Brute-Force Sort**
+- Use the B-tree index on `metadata->>'book_name'` to find all matching rows
+- Fetch all matching rows from the table (heap)
+- Compute vector distance for every row, sort, take top N
+- Cost depends on: number of matching rows multiplied by cost per distance computation
+
+### The Cost Estimation Flaw
+
+The planner's cost model for HNSW indexes does not accurately reflect the true cost of vector distance computation:
+
+- **It overestimates the cost of HNSW traversal** at higher `LIMIT` values. It assumes scanning more graph nodes is expensive.
+- **It underestimates the cost of brute-force distance computation**. It treats vector distance like a simple comparison, but computing `embedding <=> query_vector` on 1,536-dimensional float32 vectors is orders of magnitude more expensive than comparing scalar values.
+
+At low `top_k` values, the HNSW path looks cheaper to the planner because it only needs to traverse a small portion of the graph. At higher `top_k` values, the planner's cost estimate for the HNSW path rises faster than the (underestimated) cost of the brute-force path, causing it to switch strategies.
+
+### The Exact Tipping Points
+
+I tested the planner's decision at fine-grained `top_k` values to find the exact thresholds:
+
+| Filter Value | Matching Rows | % of Total | HNSW Used Up To | Switches At |
+|---|---|---|---|---|
+| 00. New Spring (smallest) | 63,945 | 2.6% | top_k = 40 | top_k = 45 |
+| 06. Lord of Chaos (largest) | 209,226 | 8.4% | top_k = 40 | top_k = 42 |
+
+The threshold is remarkably consistent at around **top_k = 40 to 42** regardless of filter selectivity for this dataset. For your data, it will depend on:
+- Total number of rows
+- Number of rows matching the filter
+- Vector dimensionality
+- PostgreSQL statistics (`n_distinct`, row estimates)
+- `random_page_cost` and other planner cost parameters
+
+---
+
+## Workarounds: What I Tested
+
+I systematically tested 7 different approaches to work around the planner's bad decision. Here is what happened:
+
+```mermaid
+flowchart LR
+    subgraph "Workaround Results"
+        direction TB
+        W1["enable_bitmapscan = off"] -->|"~800 ms<br/>Still no HNSW"| R1["Band-aid"]
+        W2["Disable all scan types"] -->|"~818 ms<br/>Planner ignores hints"| R2["Does not work"]
+        W3["hnsw.ef_search = 200"] -->|"~797 ms<br/>No plan change"| R3["Does not work"]
+        W4["hnsw.iterative_scan"] -->|"~795 ms<br/>Planner still avoids HNSW"| R4["Does not work"]
+        W5["iterative_scan +<br/>disable all scans"] -->|"~871 ms<br/>Planner still avoids HNSW"| R5["Does not work"]
+        W6["CTE Over-Fetch"] -->|"~187 ms<br/>Forces HNSW usage"| R6["Best workaround"]
+    end
+
+    style R1 fill:#f59e0b,color:#fff
+    style R2 fill:#ef4444,color:#fff
+    style R3 fill:#ef4444,color:#fff
+    style R4 fill:#ef4444,color:#fff
+    style R5 fill:#ef4444,color:#fff
+    style R6 fill:#22c55e,color:#fff
+```
+
+### Approach 1: `SET enable_bitmapscan = off`
+
+This PostgreSQL GUC (Grand Unified Configuration) parameter tells the planner to avoid Bitmap Scan plans.
+
+**Result**: The planner switched to a **regular B-Tree Index Scan** (instead of Bitmap Scan) + Sort. It still fetched all 63,945 matching rows and computed brute-force distances. Execution time: **~800 ms** (warm cache). Much better than 215 seconds, but still not using the HNSW index.
+
+**Why**: Disabling bitmap scan does not make the HNSW path cheaper in the planner's estimates; it just eliminates one alternative, so the planner picks the next best non-HNSW option.
+
+### Approach 2: Disable All Non-HNSW Scan Types
+
+```sql
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SET enable_indexscan = off;
+```
+
+**Result**: The planner **still** did not use the HNSW index. It fell back to the B-tree index scan anyway. PostgreSQL will not completely avoid index scans when no other option exists; it treats the `enable_*` settings as strong hints, not absolute rules.
+
+Execution time: **~818 ms**. Same brute-force pattern.
+
+### Approach 3: Increase `hnsw.ef_search`
+
+```sql
+SET hnsw.ef_search = 200;  -- Default is 40
+```
+
+The theory: a larger `ef_search` means the HNSW index explores more candidates, potentially finding enough filtered matches. But this does not affect the planner's cost estimation.
+
+**Result**: **No change in plan.** The planner still chose Bitmap Heap Scan. The `ef_search` parameter only affects HNSW behavior when the planner actually chooses to use the HNSW index.
+
+### Approach 4: `hnsw.iterative_scan = relaxed_order` (pgvector 0.8.0+)
+
+pgvector 0.8.0 introduced iterative scan, designed specifically for cases where the HNSW index needs to keep searching beyond `ef_search` candidates to satisfy a `LIMIT` after filtering. This is the feature that should fix this problem.
+
+**Result**: **The planner still chose Bitmap Heap Scan.** The `hnsw.iterative_scan` setting enables the iterative behavior, but it does not change the planner's cost estimates. If the planner does not choose the HNSW path, iterative scan never activates.
+
+### Approach 5: Iterative Scan + Disable All Other Scans
+
+Combined `hnsw.iterative_scan = relaxed_order` with disabling all other scan types.
+
+**Result**: Still no HNSW usage. The planner is remarkably persistent in avoiding the HNSW index for this query pattern at higher `LIMIT` values. Even with `enable_seqscan = off`, `enable_bitmapscan = off`, and `enable_indexscan = off`, the planner still chose the B-tree metadata index with sort (~871 ms), refusing to use the HNSW index for the filtered query.
+
+### Approach 6: CTE Over-Fetch Pattern (The Best Workaround)
+
+This restructures the query to force HNSW usage:
+
+```sql
+WITH nearest AS (
+    SELECT id, embedding, metadata,
+           1 - (embedding <=> $1) AS similarity
+    FROM wot_chunks_2_5m
+    ORDER BY embedding <=> $1
+    LIMIT $3 * 40   -- Over-fetch: 50 * 40 = 2000 candidates
+)
+SELECT id, similarity
+FROM nearest
+WHERE metadata->>'book_name' = $2
+ORDER BY similarity DESC
+LIMIT $3
+```
+
+**Result**: The CTE (Common Table Expression) always uses the HNSW index because the inner query has no `WHERE` clause. It is a pure vector search. The filter is applied after the HNSW results are materialized.
+
+Execution time with 40x over-fetch: **~187 ms**. Fast.
+
+**Trade-off**: You need to over-fetch by enough to statistically guarantee you will have `top_k` results after filtering. For a book representing 2.6% of the dataset, you would need to fetch `top_k / 0.026` which is approximately `40 x top_k` candidates. This works when you know the approximate selectivity of your filter. It may return fewer rows than requested if the over-fetch multiplier is too low.
+
+### Approach 7: `SET enable_bitmapscan = off` (Production Band-Aid)
+
+While not the ideal fix, setting `enable_bitmapscan = off` at the session or cluster level reduces the worst case from 215 seconds to ~800 ms. This can be configured in the CNPG cluster CRD:
+
+```yaml
+postgresql:
+  parameters:
+    enable_bitmapscan: "off"
+```
+
+Or set per connection in your application:
+
+```python
+await conn.execute("SET enable_bitmapscan = off")
+```
+
+---
+
+## Summary of Workaround Results
+
+| Approach | Uses HNSW? | Latency (top_k=50) | Practical? |
+|---|---|---|---|
+| Default (no changes) | No | 215,251 ms | Broken |
+| `enable_bitmapscan = off` | No | ~800 ms | Band-aid |
+| Disable all scan types | No | ~818 ms | Does not work |
+| `hnsw.ef_search = 200` | No | ~797 ms | Does not work |
+| `hnsw.iterative_scan` | No | ~795 ms | Does not work (planner ignores) |
+| Iterative scan + disable all scans | No | ~871 ms | Does not work |
+| **CTE over-fetch** | **Yes** | **~187 ms** | **Best workaround** |
+
+---
+
+## The Second Problem: Why Hybrid Search is 3 to 4x Slower
+
+With the filtered search cliff understood, I turned to the second anomaly in the benchmark data: hybrid search (vector + full-text via RRF) is consistently 3 to 4x slower than pure vector search, even at low `top_k` values where filtered search performs well.
+
+To identify the bottleneck, I ran `EXPLAIN ANALYZE` on each component of the hybrid query in isolation, then on the full combined query.
+
+### Decomposing the Hybrid Query
+
+The hybrid search query has four logical parts:
+1. **Vector CTE**: Pure HNSW vector search to find nearest neighbors
+2. **Text CTE**: GIN-based full-text search with `ts_rank()` scoring
+3. **FULL OUTER JOIN**: Merge vector and text results by row ID
+4. **RRF scoring + final sort**: Compute Reciprocal Rank Fusion scores and return top N
+
+I benchmarked each part independently (5 runs each, median latency, single connection, warm cache):
+
+| Component | Median Latency | What It Does |
+|---|---|---|
+| **Pure vector search** (LIMIT 10) | **188 ms** | HNSW index scan, returns 10 rows |
+| **Vector CTE with ROW_NUMBER** (LIMIT 20) | **190 ms** | Same HNSW scan + window function (negligible overhead) |
+| **Text search CTE alone** (LIMIT 20) | **1,442 ms** | GIN bitmap scan on 76,198 matching rows + ts_rank on all + sort |
+| **Full hybrid RRF** (top_k=10) | **1,605 ms** | Both CTEs + FULL OUTER JOIN + RRF sort |
+| **Full hybrid RRF** (top_k=50) | **1,629 ms** | Same, slightly larger LIMIT |
+
+The answer is immediately clear: **the text search CTE alone takes 1,442 ms, which accounts for roughly 90% of the total hybrid query time**. The vector CTE, the FULL OUTER JOIN, and the RRF computation together add only about 160 ms on top.
+
+### What the Text Search Plan Reveals
+
+The `EXPLAIN ANALYZE` output for the text search CTE tells the full story:
+
+```
+Limit (actual time=1227.567..1251.604 rows=20 loops=1)
+  Buffers: shared hit=59466
+  -> WindowAgg (actual time=1227.566..1251.598 rows=20 loops=1)
+       -> Gather Merge (actual time=1227.556..1251.579 rows=20 loops=1)
+             Workers Planned: 3
+             Workers Launched: 3
+             -> Sort (actual time=1222.185..1222.219 rows=125 loops=4)
+                   Sort Key: ts_rank(...) DESC
+                   Sort Method: quicksort  Memory: 7599kB
+                   -> Parallel Bitmap Heap Scan on wot_chunks_2_5m
+                        (actual time=36.402..1211.523 rows=19049 loops=4)
+                         Recheck Cond: (to_tsvector(...) @@ 'dragon'::tsquery)
+                         -> Bitmap Index Scan on wot_chunks_2_5m_to_tsvector_idx
+                              (actual time=26.139..26.140 rows=76198 loops=1)
+                              Index Searches: 1
+Execution Time: 1252.254 ms
+```
+
+Here is what happens step by step:
+
+```mermaid
+flowchart TD
+    subgraph "Text Search CTE Execution"
+        S1["Step 1: GIN Bitmap Index Scan<br/>Finds all 76,198 rows matching 'dragon'<br/>Time: 26 ms"]
+        S2["Step 2: Parallel Bitmap Heap Scan<br/>4 workers fetch ALL 76,198 rows from disk<br/>59,466 buffer hits across ~15,000 heap blocks<br/>Time: ~1,175 ms per worker"]
+        S3["Step 3: ts_rank() computation<br/>Re-tokenizes content and scores<br/>ALL 76,198 rows (done during heap scan)"]
+        S4["Step 4: Sort<br/>Each worker sorts ~19,000 rows by ts_rank<br/>quicksort in 7.5 MB memory"]
+        S5["Step 5: Gather Merge + WindowAgg<br/>Merge sorted results from 4 workers<br/>Apply ROW_NUMBER, return top 20"]
+
+        S1 --> S2 --> S3 --> S4 --> S5
+    end
+
+    style S2 fill:#ef4444,color:#fff
+    style S3 fill:#ef4444,color:#fff
+```
+
+The bottleneck is steps 2 and 3. Even with 4 parallel workers, PostgreSQL must:
+- **Fetch every one of the 76,198 matching rows** from the heap (the actual table pages)
+- **Compute `ts_rank()` on each row**, which involves re-tokenizing the `content` text column at query time
+- **Sort all 76,198 scored rows** just to return the top 20
+
+This is the same "fetch all, score all, sort all" pattern we saw in the filtered search cliff. The GIN index efficiently identifies which rows contain the keyword, but it cannot rank them. PostgreSQL has no way to say "give me the top 20 rows by `ts_rank` directly from the index" because `ts_rank()` depends on term frequency within each document, which is not stored in the GIN index.
+
+### Why This Is Not a Query Structure or Client-Side Issue
+
+The diagnosis rules out several hypotheses:
+
+- **Not the RRF algorithm**: The FULL OUTER JOIN and RRF computation add only ~160 ms
+- **Not the ROW_NUMBER window function**: Adding ROW_NUMBER to the vector CTE adds less than 2 ms
+- **Not the CTE materialization overhead**: PostgreSQL plans the CTEs efficiently
+- **Not the vector CTE**: The HNSW search completes in ~3 ms within the full hybrid plan
+- **Not a client-side bottleneck**: All timing is measured server-side via `EXPLAIN ANALYZE`
+
+It is entirely a **server-side architectural limitation**: PostgreSQL's GIN index cannot produce ranked results without fetching and scoring every matching row.
+
+### Why This Does Not Degrade with top_k
+
+Unlike the filtered search cliff, hybrid search latency remains relatively stable across `top_k` values (1,605 ms at top_k=10 vs 1,629 ms at top_k=50). This makes sense: the expensive part is fetching and scoring all 76,198 text matches, and changing the final `LIMIT` from 10 to 50 does not change how many rows the text CTE must process.
+
+### Potential Mitigations
+
+1. **Pre-computed `tsvector` column**: Store the tokenized vector as a materialized column (`ALTER TABLE ADD COLUMN tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED`) to avoid re-tokenizing at query time. This saves CPU but still requires fetching all matching rows.
+
+2. **Reduce the text CTE over-fetch**: The current implementation uses `LIMIT top_k * 2` in the text CTE, but this does not help because PostgreSQL must still compute `ts_rank()` on all matching rows before it can pick the top N.
+
+3. **RUM index extension**: The `rum` extension (if available) extends GIN to support ordering within the index itself, potentially allowing "top N by rank" queries without fetching all matches. This is the most promising server-side mitigation but requires installing an additional extension.
+
+4. **Accept the trade-off**: At 14 ms average in the concurrent benchmark (vs 4 ms for vector search), hybrid search may still be acceptable for many use cases. The absolute latency is reasonable; it is the relative gap that is notable.
+
+---
+
+## Comparison: Purpose-Built Vector Databases Don't Have This Problem
+
+Both the filtered search cliff and the hybrid search bottleneck are specific to PostgreSQL's architecture: its general-purpose query planner and the separation between index lookup and result scoring. Purpose-built vector databases like **Milvus** handle these operations differently:
+
+- **Filtered search**: Milvus performs the filter and vector search as a single integrated operation within the index layer. There is no query planner choosing between alternative strategies, so there is no tipping point where performance collapses.
+- **Hybrid search**: Milvus implements text ranking natively within its index engine, avoiding the "fetch all, score all, sort all" pattern that PostgreSQL's GIN index requires.
+- Performance scales predictably with dataset size, regardless of `top_k` or search pattern.
+
+In my benchmarks on the same 2.5 million vector dataset, Milvus showed no degradation at `top_k = 50` or `top_k = 100` for filtered search. At `top_k = 50` with concurrency 50, Milvus Distributed delivers consistent sub-20ms latencies and thousands of QPS, while pgvector is stuck at 1,915 ms and 24.85 QPS for filtered search.
+
+This is not a criticism of PostgreSQL. It is a general-purpose relational database doing something it was not originally designed for. The query planner's cost model was built for scalar operations, and it works brilliantly for traditional SQL workloads. But both vector distance computation and relevance-ranked full-text search have fundamentally different cost profiles that the planner and index system cannot accurately model.
+
+---
+
+## Recommendations
+
+### If You Are Using pgvector in Production
+
+1. **Test your actual query patterns** with `EXPLAIN ANALYZE` at your production `top_k` values. Do not assume small-scale benchmarks will extrapolate.
+
+2. **Know your filtered search tipping point.** Run a sweep of `top_k` values with `EXPLAIN (COSTS)` to find where the planner switches from HNSW to brute-force for your specific data distribution.
+
+3. **Use the CTE over-fetch pattern** for filtered search when `top_k` exceeds your tipping point. Calculate the over-fetch multiplier based on your filter selectivity.
+
+4. **Set `enable_bitmapscan = off`** as a safety net if you cannot restructure queries. This will not give you HNSW performance, but it prevents the worst-case scenario.
+
+5. **Profile your hybrid search queries.** Run `EXPLAIN ANALYZE` on the text CTE in isolation to understand how many rows your keywords match. If common search terms match tens of thousands of rows, expect the text component to dominate query time. Consider a pre-computed `tsvector` column or the `rum` extension.
+
+6. **Monitor Prometheus metrics** for sudden CPU spikes during filtered search. This is the telltale sign of the planner choosing brute-force.
+
+### If You Are Evaluating Vector Databases
+
+Consider whether filtered search and hybrid search are core requirements. If your application heavily relies on vector search with metadata filtering or combined vector + full-text search (which most real-world RAG applications do), be aware that pgvector has these fundamental limitations at scale. Purpose-built vector databases handle both patterns natively without planner-related performance cliffs or full-text scoring bottlenecks.
+
+---
+
+## Conclusion
+
+pgvector is a remarkable extension that brings vector search to PostgreSQL. For many workloads, especially at smaller scale or without complex filtering, it performs admirably. But at 2.5 million vectors, two distinct architectural limitations emerge:
+
+1. **Filtered search**: A fundamental mismatch between PostgreSQL's query planner cost model and the actual cost of vector operations creates a performance cliff that is invisible until you hit it. The planner does exactly what it is supposed to: pick the plan with the lowest estimated cost. The problem is that its cost estimates for vector operations are off by orders of magnitude. The CTE over-fetch pattern remains the most reliable workaround.
+
+2. **Hybrid search**: PostgreSQL's GIN index cannot produce relevance-ranked results without fetching and scoring every matching row. For common keywords that match tens of thousands of documents, this "fetch all, score all, sort all" pattern makes the full-text component dominate hybrid query time, regardless of how fast the vector component is.
+
+Neither issue is a bug in pgvector or PostgreSQL. They are architectural consequences of building vector and hybrid search capabilities on top of a general-purpose relational database engine that was designed for scalar operations and exact-match indexing. Understanding these trade-offs is essential for anyone evaluating pgvector for production use at scale.
+
+---
+
+*All benchmark code, Kubernetes configurations, and diagnostic scripts referenced in this article are available in this repository.*
+
+*Infrastructure: Azure AKS with CloudNativePG operator, PostgreSQL 18.1, pgvector 0.8.1, Standard_D16s_v3 nodes (16 vCPU, 64 GB RAM), 100 GB Azure Premium SSD.*
+
+---
+
+## Repository Structure
+
+```
+pgvector-filtering-investigation/
+├── README.md                          # This article
+├── pyproject.toml                     # Python dependencies (pgvector-only)
+│
+├── src/
+│   ├── pgvector/                      # Benchmark scripts
+│   │   ├── common.py                  # Shared config (table names, connection params)
+│   │   ├── 01_insert_benchmark.py     # Standard INSERT benchmark
+│   │   ├── 01_insert_benchmark_copy.py # PostgreSQL COPY binary insert (10-50x faster)
+│   │   ├── 02_create_indexes.py       # HNSW + B-tree + GIN index creation
+│   │   ├── 03_retrieval_asyncpg.py    # Async retrieval (vector, filtered, hybrid)
+│   │   ├── 03_retrieval_psycopg2_sync.py
+│   │   ├── 03_retrieval_psycopg3_sync.py
+│   │   └── 03_retrieval_psycopg3_async.py
+│   └── shared/                        # Shared utilities
+│       ├── dataset.py                 # Parquet dataset loader
+│       ├── results_db.py              # Results DB writer (sync)
+│       ├── results_db_async.py        # Results DB writer (async)
+│       ├── logger.py                  # structlog configuration
+│       └── ...
+│
+├── scripts/
+│   ├── cnpg_filtered_search_diagnosis.py  # EXPLAIN ANALYZE for filtered search cliff
+│   ├── cnpg_hybrid_search_diagnosis.py    # EXPLAIN ANALYZE for hybrid search bottleneck
+│   ├── plot_article_benchmarks.py         # Generate benchmark result charts
+│   └── setup_pgvector.py                  # Initial pgvector table setup
+│
+├── data/
+│   └── wot_dataset.yaml               # Dataset column config
+│
+├── infrastructure/
+│   ├── docker/
+│   │   └── Dockerfile                 # Benchmark engine Docker image
+│   └── cnpg-pgvector/
+│       ├── Dockerfile                 # Custom PostgreSQL 18.1 + pgvector 0.8.1
+│       ├── cluster.yaml               # CNPG Cluster CRD definition
+│       └── monitoring/                # Prometheus/Grafana configs
+│           ├── cnpg-extra-monitoring.yaml
+│           ├── cnpg-podmonitor.yaml
+│           ├── values-prometheus-grafana.yaml
+│           └── dashboards/
+│               └── cnpg-pgvector-overview.json
+│
+├── kube/
+│   ├── pvc.yaml                       # PV + PVC for Azure Files dataset mount
+│   └── charts/
+│       └── benchmark-engine/
+│           ├── Chart.yaml
+│           ├── values.yaml
+│           ├── templates/             # Helm templates (Job, ConfigMap)
+│           └── examples/              # CNPG-only Helm value files
+│               ├── index-cnpg-pgvector.yaml
+│               ├── insert-cnpg-pgvector.yaml
+│               ├── insert-cnpg-pgvector-copy.yaml
+│               └── retrieval-cnpg-pgvector-asyncpg.yaml
+│
+└── doc/
+    ├── CNPG_PGVECTOR_SETUP.md         # Full CNPG cluster setup guide
+    ├── CNPG_MONITORING_SETUP.md        # Prometheus/Grafana monitoring setup
+    ├── execution-guide.md             # Docker build, secrets, PVC, Helm commands
+    ├── plots/                          # Benchmark result charts
+    └── screenshots/cnpg/              # Prometheus metric screenshots
+```
+
+For step-by-step instructions to reproduce everything from scratch, see [`doc/execution-guide.md`](doc/execution-guide.md).
