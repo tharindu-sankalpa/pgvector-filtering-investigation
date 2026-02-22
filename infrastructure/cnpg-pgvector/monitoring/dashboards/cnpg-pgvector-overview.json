@@ -1,0 +1,547 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Cluster Health & Key Indicators",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "mappings": [{"options": {"0": {"text": "DOWN", "color": "red"}, "1": {"text": "UP", "color": "green"}}, "type": "value"}] } },
+      "gridPos": { "h": 4, "w": 3, "x": 0, "y": 1 },
+      "id": 1,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "title": "PostgreSQL",
+      "type": "stat",
+      "targets": [{ "expr": "cnpg_collector_up{cluster=\"ml-pgvector-benchmark\"}", "legendFormat": "Status" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "none" } },
+      "gridPos": { "h": 4, "w": 3, "x": 3, "y": 1 },
+      "id": 2,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "none" },
+      "title": "PG Version",
+      "type": "stat",
+      "targets": [{ "expr": "cnpg_collector_postgres_version{cluster=\"ml-pgvector-benchmark\"}", "legendFormat": "{{full}}" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "decbytes", "thresholds": { "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 10737418240}, {"color": "red", "value": 53687091200}] } } },
+      "gridPos": { "h": 4, "w": 3, "x": 6, "y": 1 },
+      "id": 3,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "title": "DB Size",
+      "type": "stat",
+      "targets": [{ "expr": "cnpg_pg_database_size_bytes{datname=\"benchmark_vectors\"}", "legendFormat": "benchmark_vectors" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "thresholds": { "steps": [{"color": "red", "value": null}, {"color": "yellow", "value": 0.90}, {"color": "green", "value": 0.95}] } } },
+      "gridPos": { "h": 4, "w": 3, "x": 9, "y": 1 },
+      "id": 4,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "title": "Cache Hit Ratio",
+      "description": "Buffer cache effectiveness. Below 95% means PostgreSQL reads from disk — key bottleneck indicator at 2.5M scale.",
+      "type": "stat",
+      "targets": [{ "expr": "cnpg_pg_cache_hit_ratio_ratio{datname=\"benchmark_vectors\"}", "legendFormat": "Hit Ratio" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 150}, {"color": "red", "value": 195}] } } },
+      "gridPos": { "h": 4, "w": 3, "x": 12, "y": 1 },
+      "id": 5,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "title": "Active Backends",
+      "description": "Total connected backends vs max_connections (200). High values may need PgBouncer connection pooling.",
+      "type": "stat",
+      "targets": [{ "expr": "sum(cnpg_backends_total{datname=\"benchmark_vectors\"})", "legendFormat": "Active" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 1}, {"color": "red", "value": 5}] } } },
+      "gridPos": { "h": 4, "w": 3, "x": 15, "y": 1 },
+      "id": 6,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "title": "Waiting Locks",
+      "description": "Blocked sessions waiting for locks. Non-zero during benchmarks indicates lock contention — a key scalability bottleneck.",
+      "type": "stat",
+      "targets": [{ "expr": "cnpg_pg_locks_waiting_waiting", "legendFormat": "Waiting" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 10000}, {"color": "red", "value": 100000}] } } },
+      "gridPos": { "h": 4, "w": 3, "x": 18, "y": 1 },
+      "id": 7,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "title": "WAL Buffer Full",
+      "description": "Times WAL data was written to disk because buffers were full. High values indicate wal_buffers needs increasing.",
+      "type": "stat",
+      "targets": [{ "expr": "cnpg_collector_wal_buffers_full", "legendFormat": "Count" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "decbytes", "thresholds": { "steps": [{"color": "green", "value": null}, {"color": "yellow", "value": 104857600}, {"color": "red", "value": 1073741824}] } } },
+      "gridPos": { "h": 4, "w": 3, "x": 21, "y": 1 },
+      "id": 8,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "value" },
+      "title": "Temp Files Written",
+      "description": "Data spilled to temp files (work_mem exceeded). Non-zero means some operations couldn't fit in memory — increase work_mem.",
+      "type": "stat",
+      "targets": [{ "expr": "cnpg_pg_stat_database_temp_bytes{datname=\"benchmark_vectors\"}", "legendFormat": "Temp Bytes" }]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "id": 200,
+      "title": "Node Resources (Standard_D16s_v3 — 16 vCPU, 64GB)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "fillOpacity": 15, "lineWidth": 2, "stacking": {"mode": "normal"} } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "id": 10,
+      "title": "Node CPU by Mode",
+      "description": "CPU broken down by mode. High 'iowait' = disk I/O bottleneck. High 'system' = kernel overhead. Low 'user' during benchmarks = CPU underutilization (the 30-40% issue).",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "avg(rate(node_cpu_seconds_total{mode=\"user\"}[5m]))", "legendFormat": "User" },
+        { "expr": "avg(rate(node_cpu_seconds_total{mode=\"system\"}[5m]))", "legendFormat": "System" },
+        { "expr": "avg(rate(node_cpu_seconds_total{mode=\"iowait\"}[5m]))", "legendFormat": "I/O Wait" },
+        { "expr": "avg(rate(node_cpu_seconds_total{mode=\"steal\"}[5m]))", "legendFormat": "Steal (VM)" },
+        { "expr": "avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m]))", "legendFormat": "Idle" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "id": 11,
+      "title": "Node Memory Breakdown",
+      "description": "Memory breakdown. 'Cached' is OS page cache used by PostgreSQL for data files beyond shared_buffers. High cached = PostgreSQL effective_cache_size is working.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "node_memory_MemTotal_bytes", "legendFormat": "Total (64GB)" },
+        { "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes", "legendFormat": "Used" },
+        { "expr": "node_memory_Cached_bytes", "legendFormat": "Page Cache" },
+        { "expr": "node_memory_Buffers_bytes", "legendFormat": "Buffers" },
+        { "expr": "node_memory_MemAvailable_bytes", "legendFormat": "Available" }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 14 },
+      "id": 300,
+      "title": "PostgreSQL Pod Resources (vs Limits)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 15 },
+      "id": 20,
+      "title": "Pod CPU Usage vs Limits (cores)",
+      "description": "CPU cores consumed vs the 16-core limit. If this stays at 30-40% (5-6 cores) during max concurrency retrieval, it confirms the CPU underutilization problem from Azure PG.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"cnpg-pgvector\", pod=~\"ml-pgvector-benchmark-.*\", container!=\"\", container!=\"POD\"}[5m])) by (pod)", "legendFormat": "{{pod}} usage" },
+        { "expr": "sum(kube_pod_container_resource_requests{namespace=\"cnpg-pgvector\", pod=~\"ml-pgvector-benchmark-.*\", resource=\"cpu\"}) by (pod)", "legendFormat": "{{pod}} request (8)" },
+        { "expr": "sum(kube_pod_container_resource_limits{namespace=\"cnpg-pgvector\", pod=~\"ml-pgvector-benchmark-.*\", resource=\"cpu\"}) by (pod)", "legendFormat": "{{pod}} limit (16)" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "bytes", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 15 },
+      "id": 21,
+      "title": "Pod Memory Usage vs Limits",
+      "description": "Memory consumed vs the 64GB limit. Includes shared_buffers (4GB) + work_mem per connection + OS page cache. At 2.5M scale, watch for OOM pressure.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "sum(container_memory_working_set_bytes{namespace=\"cnpg-pgvector\", pod=~\"ml-pgvector-benchmark-.*\", container!=\"\", container!=\"POD\"}) by (pod)", "legendFormat": "{{pod}} working set" },
+        { "expr": "sum(container_memory_rss{namespace=\"cnpg-pgvector\", pod=~\"ml-pgvector-benchmark-.*\", container!=\"\", container!=\"POD\"}) by (pod)", "legendFormat": "{{pod}} RSS" },
+        { "expr": "sum(kube_pod_container_resource_limits{namespace=\"cnpg-pgvector\", pod=~\"ml-pgvector-benchmark-.*\", resource=\"memory\"}) by (pod)", "legendFormat": "{{pod}} limit (64Gi)" }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "id": 400,
+      "title": "Query & Index Performance (Filtered/Hybrid Search Investigation)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "id": 30,
+      "title": "Sequential Scans vs Index Scans (wot_chunks)",
+      "description": "CRITICAL for filtered search investigation. During retrieval, index scans should dominate. If sequential scans rise at higher top_k values, it means PostgreSQL falls back to full table scans — the exact cause of the 99% QPS drop at top_k>=50.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(cnpg_pg_seq_scan_vs_idx_scan_seq_scan{table_name=\"wot_chunks\"}[5m])", "legendFormat": "Sequential Scans/s" },
+        { "expr": "rate(cnpg_pg_seq_scan_vs_idx_scan_idx_scan{table_name=\"wot_chunks\"}[5m])", "legendFormat": "Index Scans/s" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "id": 31,
+      "title": "Tuples Read: Seq Scan vs Index Fetch",
+      "description": "Volume of data read per scan type. High seq_tup_read means large table portions being scanned. If idx_tup_fetch is low relative to seq_tup_read, the HNSW index isn't being used effectively.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(cnpg_pg_seq_scan_vs_idx_scan_seq_tup_read{table_name=\"wot_chunks\"}[5m])", "legendFormat": "Seq Scan Tuples/s" },
+        { "expr": "rate(cnpg_pg_seq_scan_vs_idx_scan_idx_tup_fetch{table_name=\"wot_chunks\"}[5m])", "legendFormat": "Index Fetch Tuples/s" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "rows/s", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "id": 32,
+      "title": "Tuple Throughput (benchmark_vectors)",
+      "description": "Row-level throughput breakdown. During retrieval: high 'returned' with low 'fetched' means PostgreSQL is scanning more rows than needed (over-fetching). Insert phase shows 'inserted' rate.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(cnpg_pg_stat_database_tup_returned_total{datname=\"benchmark_vectors\"}[5m])", "legendFormat": "Returned/s (scanned)" },
+        { "expr": "rate(cnpg_pg_stat_database_tup_fetched_total{datname=\"benchmark_vectors\"}[5m])", "legendFormat": "Fetched/s (used)" },
+        { "expr": "rate(cnpg_pg_stat_database_tup_inserted_total{datname=\"benchmark_vectors\"}[5m])", "legendFormat": "Inserted/s" },
+        { "expr": "rate(cnpg_pg_stat_database_tup_updated_total{datname=\"benchmark_vectors\"}[5m])", "legendFormat": "Updated/s" },
+        { "expr": "rate(cnpg_pg_stat_database_tup_deleted_total{datname=\"benchmark_vectors\"}[5m])", "legendFormat": "Deleted/s" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "id": 33,
+      "title": "Transactions Per Second",
+      "description": "Commit and rollback rates. During retrieval benchmarks, this should correlate with QPS. Rollbacks indicate query failures or timeouts.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(cnpg_pg_stat_database_xact_commit_total{datname=\"benchmark_vectors\"}[5m])", "legendFormat": "Commits/s" },
+        { "expr": "rate(cnpg_pg_stat_database_xact_rollback_total{datname=\"benchmark_vectors\"}[5m])", "legendFormat": "Rollbacks/s" }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 40 },
+      "id": 500,
+      "title": "Connections & Concurrency (PgBouncer Decision)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 41 },
+      "id": 40,
+      "title": "Connections by State",
+      "description": "Connection breakdown. High 'idle' connections waste resources — indicates need for PgBouncer. 'idle in transaction' holds locks and blocks vacuum. 'active' shows actual query concurrency.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "cnpg_pg_connections_by_state_count{state=\"active\"}", "legendFormat": "Active" },
+        { "expr": "cnpg_pg_connections_by_state_count{state=\"idle\"}", "legendFormat": "Idle" },
+        { "expr": "cnpg_pg_connections_by_state_count{state=\"idle in transaction\"}", "legendFormat": "Idle in Transaction" },
+        { "expr": "cnpg_pg_connections_by_state_count{state=\"\"}", "legendFormat": "Backend (non-client)" },
+        { "expr": "cnpg_pg_settings_setting{name=\"max_connections\"}", "legendFormat": "max_connections (200)" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 41 },
+      "id": 41,
+      "title": "Backends Waiting & Lock Contention",
+      "description": "Backends waiting for queries + lock-blocked sessions. Spikes here during concurrent retrieval benchmarks point to lock contention as the throughput bottleneck.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "cnpg_backends_waiting_total", "legendFormat": "Backends Waiting" },
+        { "expr": "cnpg_pg_locks_waiting_waiting", "legendFormat": "Lock Waiters" },
+        { "expr": "cnpg_backends_max_tx_duration_seconds{datname=\"benchmark_vectors\"}", "legendFormat": "Longest Tx (sec)" }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 49 },
+      "id": 600,
+      "title": "Buffer Cache & I/O (Memory Pressure Detection)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "percentunit", "min": 0, "max": 1, "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 50 },
+      "id": 50,
+      "title": "Cache Hit Ratio Over Time",
+      "description": "Tracks cache effectiveness during benchmarks. At 100K (1.7GB), should stay at 100%. At 2.5M (~40GB), will drop below 100% since shared_buffers is only 4GB — the drop correlates directly with QPS degradation.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "cnpg_pg_cache_hit_ratio_ratio{datname=\"benchmark_vectors\"}", "legendFormat": "benchmark_vectors" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 50 },
+      "id": 51,
+      "title": "Block Reads vs Cache Hits Rate",
+      "description": "Disk block reads vs cache hits. Block reads should be near zero during retrieval. Rising block reads = data doesn't fit in shared_buffers — consider increasing shared_buffers or adding read replicas.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(cnpg_pg_stat_database_blks_hit{datname=\"benchmark_vectors\"}[5m])", "legendFormat": "Cache Hits/s" },
+        { "expr": "rate(cnpg_pg_stat_database_blks_read{datname=\"benchmark_vectors\"}[5m])", "legendFormat": "Disk Reads/s" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 50 },
+      "id": 52,
+      "title": "Temp Files & Buffer Allocations",
+      "description": "Temp files = work_mem overflow (sorts/hashes spill to disk). Buffer allocs = new pages loaded into shared_buffers (high rate = cache churn). Both indicate memory pressure.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(cnpg_pg_stat_database_temp_files{datname=\"benchmark_vectors\"}[5m])", "legendFormat": "Temp Files/s" },
+        { "expr": "rate(cnpg_pg_stat_database_temp_bytes{datname=\"benchmark_vectors\"}[5m])", "legendFormat": "Temp Bytes/s" },
+        { "expr": "rate(cnpg_pg_stat_bgwriter_buffers_alloc[5m])", "legendFormat": "Buffer Allocs/s" }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 58 },
+      "id": 700,
+      "title": "Checkpoint & WAL (Write Performance)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 59 },
+      "id": 60,
+      "title": "Checkpoint Activity",
+      "description": "Timed checkpoints are normal (every 5 min). Requested checkpoints indicate heavy write activity. During inserts, high checkpoint rates can stall queries.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(cnpg_pg_stat_checkpointer_checkpoints_timed[5m])", "legendFormat": "Timed/s" },
+        { "expr": "rate(cnpg_pg_stat_checkpointer_checkpoints_req[5m])", "legendFormat": "Requested/s" },
+        { "expr": "rate(cnpg_pg_stat_checkpointer_buffers_written[5m])", "legendFormat": "Buffers Written/s" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "Bps", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 59 },
+      "id": 61,
+      "title": "WAL Generation Rate",
+      "description": "WAL write volume. High WAL generation during inserts/index builds is expected. During retrieval, should be near zero (read-only queries don't generate WAL).",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(cnpg_collector_wal_bytes[5m])", "legendFormat": "WAL Bytes/s" },
+        { "expr": "rate(cnpg_collector_wal_records[5m])", "legendFormat": "WAL Records/s" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 59 },
+      "id": 62,
+      "title": "WAL Buffer Full Events & Archival",
+      "description": "WAL buffer full = wal_buffers too small (currently 64MB). High values mean backends stall waiting for WAL flush. Archived count tracks WAL shipping for backups.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(cnpg_collector_wal_buffers_full[5m])", "legendFormat": "Buffer Full Events/s" },
+        { "expr": "rate(cnpg_pg_stat_archiver_archived_count[5m])", "legendFormat": "WAL Archived/s" },
+        { "expr": "cnpg_pg_stat_archiver_failed_count", "legendFormat": "Archive Failures (total)" }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 67 },
+      "id": 800,
+      "title": "Table & Database Size",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "decbytes", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 68 },
+      "id": 70,
+      "title": "Table Size: Heap vs Indexes (wot_chunks)",
+      "description": "Table data vs index overhead. Large index size relative to data suggests many/large indexes. HNSW index on 1536-dim vectors is naturally large.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "cnpg_pg_table_size_total_bytes{table_name=\"wot_chunks\"}", "legendFormat": "Total" },
+        { "expr": "cnpg_pg_table_size_table_bytes{table_name=\"wot_chunks\"}", "legendFormat": "Heap Data" },
+        { "expr": "cnpg_pg_table_size_index_bytes{table_name=\"wot_chunks\"}", "legendFormat": "Indexes" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "decbytes", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 68 },
+      "id": 71,
+      "title": "Database Size Over Time",
+      "description": "Total database disk usage. Tracks growth during insert benchmarks and steady state during retrieval.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "cnpg_pg_database_size_bytes{datname=\"benchmark_vectors\"}", "legendFormat": "benchmark_vectors" },
+        { "expr": "cnpg_collector_pg_wal{value=\"size\"}", "legendFormat": "WAL Directory" }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 76 },
+      "id": 900,
+      "title": "Network & Disk I/O",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "Bps", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 77 },
+      "id": 80,
+      "title": "Pod Network I/O",
+      "description": "Network throughput to/from the PostgreSQL pod. During retrieval, RX = incoming queries, TX = result data. Compare with Milvus network patterns.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "sum(rate(container_network_receive_bytes_total{namespace=\"cnpg-pgvector\", pod=~\"ml-pgvector-benchmark-.*\"}[5m]))", "legendFormat": "RX (Queries In)" },
+        { "expr": "sum(rate(container_network_transmit_bytes_total{namespace=\"cnpg-pgvector\", pod=~\"ml-pgvector-benchmark-.*\"}[5m]))", "legendFormat": "TX (Results Out)" }
+      ]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "Bps", "custom": { "fillOpacity": 15, "lineWidth": 2 } } },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 77 },
+      "id": 81,
+      "title": "Pod Disk I/O",
+      "description": "Disk read/write throughput. During retrieval, reads indicate cache misses. During inserts/index builds, high writes are expected.",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "sum(rate(container_fs_reads_bytes_total{namespace=\"cnpg-pgvector\", pod=~\"ml-pgvector-benchmark-.*\", container!=\"\"}[5m]))", "legendFormat": "Disk Read" },
+        { "expr": "sum(rate(container_fs_writes_bytes_total{namespace=\"cnpg-pgvector\", pod=~\"ml-pgvector-benchmark-.*\", container!=\"\"}[5m]))", "legendFormat": "Disk Write" }
+      ]
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 85 },
+      "id": 1000,
+      "title": "Key PostgreSQL Configuration (Tuning Reference)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "deckbytes" } },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 86 },
+      "id": 90,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "none" },
+      "title": "shared_buffers",
+      "description": "PostgreSQL buffer cache size. Currently 4GB. At 2.5M scale, consider increasing to 8-16GB.",
+      "type": "stat",
+      "targets": [{ "expr": "cnpg_pg_settings_setting{name=\"shared_buffers\"} * 8 / 1024", "legendFormat": "MB" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "deckbytes" } },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 86 },
+      "id": 91,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "none" },
+      "title": "work_mem",
+      "description": "Per-operation sort/hash memory. Currently 256MB. Temp file creation indicates this may need increasing for complex queries.",
+      "type": "stat",
+      "targets": [{ "expr": "cnpg_pg_settings_setting{name=\"work_mem\"} * 8 / 1024", "legendFormat": "MB" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "deckbytes" } },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 86 },
+      "id": 92,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "none" },
+      "title": "effective_cache_size",
+      "description": "Hint to query planner about total cache available (shared_buffers + OS cache). Currently 12GB.",
+      "type": "stat",
+      "targets": [{ "expr": "cnpg_pg_settings_setting{name=\"effective_cache_size\"} * 8 / 1024", "legendFormat": "MB" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 4, "w": 3, "x": 12, "y": 86 },
+      "id": 93,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "none" },
+      "title": "max_connections",
+      "type": "stat",
+      "targets": [{ "expr": "cnpg_pg_settings_setting{name=\"max_connections\"}", "legendFormat": "Limit" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 4, "w": 3, "x": 15, "y": 86 },
+      "id": 94,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "none" },
+      "title": "max_parallel_workers",
+      "description": "Total parallel workers across all queries. Currently 8. If CPU stays low, parallel query may not be engaging.",
+      "type": "stat",
+      "targets": [{ "expr": "cnpg_pg_settings_setting{name=\"max_parallel_workers\"}", "legendFormat": "Workers" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "short" } },
+      "gridPos": { "h": 4, "w": 3, "x": 18, "y": 86 },
+      "id": 95,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "none" },
+      "title": "max_parallel_per_gather",
+      "description": "Parallel workers per query. Currently 4. HNSW index scans don't parallelize in pgvector — this explains low CPU utilization during vector search.",
+      "type": "stat",
+      "targets": [{ "expr": "cnpg_pg_settings_setting{name=\"max_parallel_workers_per_gather\"}", "legendFormat": "Per Query" }]
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "fieldConfig": { "defaults": { "unit": "deckbytes" } },
+      "gridPos": { "h": 4, "w": 3, "x": 21, "y": 86 },
+      "id": 96,
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "none" },
+      "title": "wal_buffers",
+      "description": "WAL write buffer. Currently 64MB. High wal_buffers_full events suggest increasing this.",
+      "type": "stat",
+      "targets": [{ "expr": "cnpg_pg_settings_setting{name=\"wal_buffers\"} * 8 / 1024", "legendFormat": "MB" }]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["cnpg", "postgresql", "pgvector", "benchmarking"],
+  "templating": {
+    "list": [
+      {
+        "current": { "selected": false, "text": "Prometheus", "value": "Prometheus" },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "name": "datasource",
+        "query": "prometheus",
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "CNPG pgVector Benchmark Overview",
+  "uid": "cnpg-pgvector-overview",
+  "version": 2
+}

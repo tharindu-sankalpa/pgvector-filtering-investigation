@@ -1,0 +1,21 @@
+# Manual PodMonitor for CNPG PostgreSQL
+# Replaces the deprecated spec.monitoring.enablePodMonitor field
+# Reference: https://cloudnative-pg.io/documentation/current/monitoring/
+#
+# Apply: kubectl apply -f infrastructure/cnpg-pgvector/monitoring/cnpg-podmonitor.yaml
+
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: ml-pgvector-benchmark
+  namespace: cnpg-pgvector
+  labels:
+    cnpg.io/cluster: ml-pgvector-benchmark
+spec:
+  selector:
+    matchLabels:
+      cnpg.io/cluster: ml-pgvector-benchmark
+  podMetricsEndpoints:
+    - port: metrics
+      interval: 15s
+      scrapeTimeout: 10s

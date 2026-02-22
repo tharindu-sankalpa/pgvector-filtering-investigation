@@ -1,0 +1,102 @@
+# Prometheus + Grafana for CNPG PostgreSQL pgVector Benchmarking
+# Mirrors the Milvus monitoring stack (infrastructure/monitoring/values-prometheus-grafana.yaml)
+# with CNPG-specific additions.
+#
+# Install:
+#   helm upgrade --install prometheus prometheus-community/kube-prometheus-stack \
+#     --namespace monitoring --create-namespace \
+#     -f infrastructure/cnpg-pgvector/monitoring/values-prometheus-grafana.yaml --wait
+
+prometheus:
+  prometheusSpec:
+    scrapeInterval: 15s
+    evaluationInterval: 15s
+
+    # Retention - survive cluster stop/start
+    retention: 7d
+    retentionSize: "10GB"
+
+    # Resources - lighter than Milvus (single PG pod vs multi-component cluster)
+    resources:
+      requests:
+        cpu: 500m
+        memory: 2Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+
+    # Persistent storage - survives pod restarts and cluster stop/start
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: managed-csi-premium
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 20Gi
+
+    # Auto-discover all ServiceMonitors and PodMonitors across all namespaces
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    serviceMonitorNamespaceSelector: {}
+    podMonitorNamespaceSelector: {}
+
+# Grafana configuration
+grafana:
+  enabled: true
+  adminPassword: "admin123"
+
+  persistence:
+    enabled: true
+    storageClassName: managed-csi-premium
+    size: 10Gi
+
+  # Port-forward only (no LoadBalancer to save public IPs)
+  service:
+    type: ClusterIP
+
+  resources:
+    requests:
+      cpu: 250m
+      memory: 512Mi
+    limits:
+      cpu: 500m
+      memory: 1Gi
+
+  # Pre-configure Prometheus datasource
+  datasources:
+    datasources.yaml:
+      apiVersion: 1
+      datasources:
+      - name: Prometheus
+        type: prometheus
+        url: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+        access: proxy
+        isDefault: true
+        editable: true
+
+  # Sidecar for auto-loading dashboards from ConfigMaps
+  sidecar:
+    datasources:
+      enabled: false
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+
+# Alertmanager (not needed for benchmarking)
+alertmanager:
+  enabled: false
+
+# Kube-state-metrics (pod/node metrics)
+kube-state-metrics:
+  enabled: true
+
+# Node exporter (host-level CPU, memory, disk, network)
+prometheus-node-exporter:
+  enabled: true
+
+# Pushgateway (not needed)
+prometheus-pushgateway:
+  enabled: false
