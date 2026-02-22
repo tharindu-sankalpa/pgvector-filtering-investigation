@@ -1,331 +1,160 @@
 # The Hidden Performance Cliff in pgvector: How PostgreSQL's Query Planner Breaks Filtered Vector Search at Scale
 
-*A deep investigation into why pgvector's filtered search degrades by 99% beyond a specific `top_k` threshold, and what you can do about it.*
-
+_A deep investigation into why pgvector's filtered search degrades by 99% beyond a specific `top_k` threshold, and what you can do about it._
 
 ## Introduction
 
-PostgreSQL with pgvector has become a popular choice for vector similarity search. The appeal is obvious: use your existing PostgreSQL infrastructure, avoid managing a separate vector database, and leverage decades of SQL ecosystem maturity. For many use cases, this works well.
+As businesses increasingly adopt generative AI, the vector database has emerged as arguably the most critical infrastructure component in the modern AI stack. Because most production-grade systems rely on hosted APIs from LLM providers rather than provisioning their own models, the vector database - which grounds these models in proprietary data via Retrieval-Augmented Generation (RAG) - becomes the central piece of infrastructure you must actually manage and scale.
 
-But when I pushed pgvector to 2.5 million vectors, I discovered two distinct performance problems that are invisible at smaller scale:
+The appeal of using PostgreSQL with pgvector for this is obvious: use your existing relational database, avoid operating a separate specialized vector database, and leverage decades of SQL ecosystem maturity. For many use cases, this works well.
 
-1. **Filtered search cliff**: Queries went from **83 milliseconds** to over **215 seconds**, a **2,500x degradation**, triggered by nothing more than changing the `LIMIT` clause from 10 to 50.
-2. **Hybrid search bottleneck**: Even at low `top_k`, hybrid search (vector + full-text via RRF) is consistently **3 to 4x slower** than pure vector search, with the full-text search component consuming over 90% of query time.
+But when moving from prototyping to production-grade workloads and scaling pgvector to millions of vectors, I discovered two distinct performance problems that remain invisible at a smaller scale:
 
-This article walks through the technical investigation that uncovered the root cause of both problems, shows you the `EXPLAIN ANALYZE` evidence, and presents the workarounds I tested.
+1. **Filtered search cliff**: Queries went from **83 milliseconds** to over **215 seconds**, a **2,500x degradation**, triggered by nothing more than changing the `LIMIT` clause (for example, requesting 50 nearest neighbors instead of 10). This catastrophic fall-off does not happen in pure vector search; it only occurs when combining vector search with **metadata filtering**. The root cause is a flaw in the query planner's cost calculation. Up to a certain number of requested nearest neighbors, it efficiently uses the HNSW vector index. But at a specific `LIMIT` threshold - which depends completely on what percentage of your dataset matches the filter condition - the planner miscalculates the cost of post-filtering versus pre-filtering. Once you cross this hidden threshold, it suddenly abandons the HNSW index in favor of a B-tree metadata index scan, forcing a massive brute-force vector distance calculation on every single matching row.
+2. **Hybrid search bottleneck**: Even at low `top_k`, hybrid search (vector + full-text via RRF) is consistently **3 to 4x slower** than pure vector search, with the full-text search component consuming over 90% of query time. This happens because PostgreSQL's GIN index for full-text search operates on a "fetch all, score all, sort all" pattern. While it can efficiently find all rows containing a keyword, it cannot inherently rank them by relevance (`ts_rank()`). To return even the top 10 results, the database must fetch every matching row from disk, re-tokenize the text to compute the rank, and sort the entire matching set, which creates large overhead compared to a graph-based vector index.
+
+This article walks through the full technical investigation that uncovered the root cause of both problems, with `EXPLAIN ANALYZE` evidence at every step. Here is what you will get from it:
+
+- **Production-grade cloud-native infrastructure**: A complete blueprint for deploying PostgreSQL with pgvector on a self-hosted AKS cluster using the CloudNativePG operator — a real-world reference architecture, not a local-machine prototype.
+- **Python async client patterns**: How to use `asyncpg` for high-concurrency vector retrieval, index creation, and bulk data ingestion via PostgreSQL's binary `COPY` protocol.
+- **Full observability stack**: Prometheus and Grafana setup with custom PostgreSQL metrics dashboards, so you can see exactly how CPU, memory, I/O, and query performance behave under load — the same monitoring that captured the real-time evidence of the performance cliff in this investigation.
+- **Quantitative evidence at scale**: Every claim is backed by data from 2.5 million vectors at 1,536 dimensions, with systematic sweeps across concurrency levels and `top_k` values. Prometheus metrics and `EXPLAIN ANALYZE` output demonstrate precisely where and why the failure occurs.
+- **Seven workaround strategies, tested and documented**: Each approach is evaluated with results, so you do not have to discover through trial and error which ones actually work and which ones the query planner silently ignores.
+- **Dataset-agnostic benchmarking framework**: If you want to evaluate whether your own dataset and query patterns will hit this limitation, you can point the included framework at your own vectors and filters to find your specific tipping points — the exact `top_k` threshold where the planner abandons the HNSW index for your data distribution — before it surprises you in production.
 
 ---
 
 ## The Setup
 
-### Infrastructure Overview
+### Infrastructure Architecture
 
-I ran this investigation on a self-hosted PostgreSQL cluster on Azure Kubernetes Service (AKS), managed by the **CloudNativePG (CNPG) operator**. The architecture uses two separate AKS clusters: one dedicated to hosting the PostgreSQL database, and another dedicated to running the benchmark workloads.
+I ran this investigation on a self-hosted PostgreSQL cluster on Azure Kubernetes Service (AKS), managed by the **CloudNativePG (CNPG) operator**. The architecture uses two separate AKS clusters: one dedicated to hosting the PostgreSQL database, and another dedicated to running the benchmark workloads. Both clusters are deployed in the **same Azure region (`northeurope`)** to rule out geographic latency as a variable in the benchmark results. In a production system, your client application would typically run on the same AKS cluster as the CloudNativePG-managed PostgreSQL instance, communicating over the cluster-internal network. Here, the separation into two clusters is intentional: it isolates benchmark workload resource consumption from the database, ensuring that CPU and memory measurements on the database node reflect only PostgreSQL's behavior.
 
 ```mermaid
 graph TB
-    subgraph "CNPG AKS Cluster (aks-cnpg-pgvector)"
+    LOCAL["Local Machine<br/>(kubectl + helm)"]
+
+    subgraph "Azure Region: North Europe"
         direction TB
-        subgraph "cnpg-system namespace"
-            OP[CNPG Operator]
+
+        subgraph "Azure Container Registry"
+            IMG1["postgresql-pgvector:18.1<br/>(Custom PG + pgvector image)"]
+            IMG2["benchmark-engine:v5.2.6<br/>(Python benchmark scripts)"]
         end
-        subgraph "cnpg-pgvector namespace"
-            PG["PostgreSQL 18.1 + pgvector 0.8.1<br/>8 vCPU request / 16 vCPU limit<br/>32 GB / 64 GB RAM<br/>100 GB Premium SSD"]
-            LB[Azure Load Balancer :5432]
+
+        subgraph "Azure Blob Storage"
+            BLOB["Storage Container<br/>Vector dataset (Parquet)<br/>Query dataset (QA pairs)"]
         end
-        subgraph "monitoring namespace"
-            PROM[Prometheus + Grafana]
+
+        subgraph "CNPG AKS Cluster (aks-cnpg-pgvector)"
+            direction TB
+            subgraph "cnpg-system namespace"
+                OP[CNPG Operator]
+            end
+            subgraph "cnpg-pgvector namespace"
+                PG["PostgreSQL 18.1 + pgvector 0.8.1<br/>8 vCPU request / 16 vCPU limit<br/>32 GB / 64 GB RAM<br/>100 GB Premium SSD"]
+                LB[Azure Load Balancer :5432]
+            end
+            subgraph "monitoring namespace"
+                PROM[Prometheus + Grafana]
+            end
+            OP -->|manages| PG
+            PG --> LB
+            PG -.->|metrics :9187| PROM
         end
-        OP -->|manages| PG
-        PG --> LB
-        PG -.->|metrics :9187| PROM
+
+        subgraph "Benchmark Execution AKS Cluster"
+            BJ["Benchmark Jobs<br/>(Insert / Index / Retrieval)"]
+        end
+
+        BJ -->|TCP/5432| LB
+        BLOB -->|mount via PVC| BJ
+        IMG1 -.->|pulls image| PG
+        IMG2 -.->|pulls image| BJ
+
+        subgraph "Azure Managed PostgreSQL"
+            RDB[(benchmark_results DB)]
+        end
+
+        BJ -->|stores results| RDB
     end
 
-    subgraph "Benchmark Execution AKS Cluster"
-        BJ["Benchmark Jobs<br/>(Insert / Index / Retrieval)"]
-    end
-
-    BJ -->|TCP/5432| LB
-
-    subgraph "Azure Managed PostgreSQL"
-        RDB[(benchmark_results DB)]
-    end
-
-    BJ -->|stores results| RDB
+    LOCAL -->|helm install| BJ
+    LOCAL -.->|docker push| IMG1
+    LOCAL -.->|docker push| IMG2
 ```
 
+The architecture has four layers. At the infrastructure level, two AKS clusters provide compute isolation: one hosts only the PostgreSQL database (managed by the CloudNativePG operator), while the other runs benchmark workloads as Kubernetes Jobs. Azure Container Registry stores both Docker images — the custom PostgreSQL + pgvector image and the Python benchmark engine — while Azure Blob Storage holds the Parquet datasets, mounted into benchmark pods via PersistentVolumeClaims. Prometheus and Grafana run on the database cluster to capture PostgreSQL-specific metrics (cache hit ratio, sequential vs index scans, lock contention, WAL throughput) during benchmark execution. All benchmark jobs are submitted from a local machine via `helm install`, which creates Kubernetes Jobs on the benchmark cluster. These jobs connect to the PostgreSQL instance over the Azure Load Balancer, execute the insert, index creation, and retrieval benchmarks, and write structured results (QPS, latency percentiles, throughput) to a separate Azure Managed PostgreSQL instance for post-execution analysis and visualization.
+
 **CNPG AKS Cluster (`aks-cnpg-pgvector`):**
+
 - **Node**: Azure `Standard_D16s_v3` (16 vCPUs, 64 GB RAM)
 - **Operator**: CloudNativePG (CNPG) v1.x, installed via Helm
-- **PostgreSQL**: 18.1 with pgvector 0.8.1
+- **PostgreSQL**: 18.1 with pgvector 0.8.1, running a custom Docker image from ACR
 - **Storage**: 100 GB Azure Premium SSD (`managed-csi-premium`)
 - **Monitoring**: Prometheus + Grafana dashboards for real-time CPU, memory, I/O, and query metrics
 
 **Benchmark Execution Cluster (`benchmark-execution-aks`):**
+
 - A separate AKS cluster running benchmark jobs as Kubernetes Jobs via Helm charts
+- **Node**: Azure `Standard_D8s_v3` (8 vCPUs, 32 GB RAM)
+- Benchmark jobs are submitted from a local machine via `helm install` with configurable values files
+- Pulls the benchmark engine Docker image from ACR
+- Mounts vector and query datasets from Azure Blob Storage via a PersistentVolumeClaim
 - Connects to the CNPG cluster over an Azure Load Balancer on port 5432
 - Results stored in an Azure Managed PostgreSQL instance for analysis
 
-### Setting Up the AKS Cluster
+**Azure Container Registry (ACR):**
 
-The CNPG cluster runs on a dedicated AKS cluster with a single `Standard_D16s_v3` node to ensure the database has exclusive access to all 16 vCPUs and 64 GB of RAM:
+- `postgresql-pgvector:18.1` — Custom PostgreSQL 18.1 image with pgvector 0.8.1 built on the CNPG base image
+- `benchmark-engine:v5.2.6` — Python benchmark suite packaged with `uv` for dependency management
 
-```bash
-# Create AKS cluster with a single D16s_v3 node
-export RESOURCE_GROUP="milvus-rg"
-export CLUSTER_NAME="aks-cnpg-pgvector"
-export LOCATION="northeurope"
-export NODE_VM_SIZE="Standard_D16s_v3"
-export ACR_NAME="benchmarkregistry504646de"
+**Azure Blob Storage:**
 
-az aks create \
-    --resource-group $RESOURCE_GROUP \
-    --name $CLUSTER_NAME \
-    --location $LOCATION \
-    --node-count 1 \
-    --node-vm-size $NODE_VM_SIZE \
-    --enable-managed-identity \
-    --generate-ssh-keys \
-    --network-plugin azure \
-    --network-policy azure \
-    --enable-addons monitoring \
-    --attach-acr $ACR_NAME
+- Contains the vector dataset (2.5 million embeddings in Parquet format) and the query dataset (QA pairs for retrieval benchmarks), mounted into benchmark jobs as a Kubernetes PersistentVolume
 
-# Get credentials
-az aks get-credentials \
-    --resource-group $RESOURCE_GROUP \
-    --name $CLUSTER_NAME \
-    --overwrite-existing
-```
+### Replicating the Infrastructure
 
-### Installing the CloudNativePG Operator
+The full infrastructure setup is documented in dedicated guides within the `doc/` directory. If you want to replicate this environment from scratch, follow these guides in order:
 
-CloudNativePG is a Kubernetes operator that manages the full lifecycle of PostgreSQL clusters through Custom Resource Definitions (CRDs). Instead of running a managed database service, you define your PostgreSQL cluster as a YAML manifest and the operator handles provisioning, failover, backup, and monitoring.
+1.  **[CNPG_PGVECTOR_SETUP.md](doc/CNPG_PGVECTOR_SETUP.md)** — Creating the dedicated AKS cluster, installing the CloudNativePG operator, building the custom PostgreSQL + pgvector Docker image, deploying the PostgreSQL cluster via CRD (with tuned parameters for vector workloads), exposing PostgreSQL via LoadBalancer, and verifying the pgvector extension.
+2.  **[CNPG_MONITORING_SETUP.md](doc/CNPG_MONITORING_SETUP.md)** — Deploying the Prometheus + Grafana observability stack, configuring CNPG PodMonitors and custom PostgreSQL metrics queries (cache hit ratio, sequential vs index scans, lock contention, WAL stats), importing the Grafana dashboard, and a comprehensive metrics interpretation guide for every dashboard panel.
+3.  **[execution-guide.md](doc/execution-guide.md)** — Provisioning the benchmark execution AKS cluster, creating Azure Container Registry and image pull secrets, setting up Azure Files storage with PersistentVolumeClaims for dataset mounting, creating Kubernetes secrets for PostgreSQL connectivity (both the CNPG target and the results database), building and pushing the benchmark engine Docker image, running insert / index / retrieval benchmarks as Helm-deployed Kubernetes Jobs, and querying the results database.
 
-```bash
-# Add the CNPG Helm repo and install the operator
-helm repo add cnpg https://cloudnative-pg.github.io/charts
-helm repo update
+Each guide is self-contained with exact commands, expected outputs, and troubleshooting steps.
 
-kubectl create namespace cnpg-system
-helm install cnpg-operator cnpg/cloudnative-pg \
-    --namespace cnpg-system \
-    --set monitoring.podMonitorEnabled=false
+**Key infrastructure files referenced by these guides:**
 
-# Verify operator is running
-kubectl get pods -n cnpg-system
-# cnpg-cloudnative-pg-xxx   Running
-```
-
-### Building a Custom PostgreSQL + pgvector Image
-
-The standard CloudNativePG PostgreSQL image does not include pgvector, so I built a custom image based on the CNPG base:
-
-```dockerfile
-FROM ghcr.io/cloudnative-pg/postgresql:18.1-standard-trixie
-
-USER root
-RUN apt update \
-    && apt install -y gnupg postgresql-common apt-transport-https \
-       lsb-release wget build-essential git \
-    && /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y \
-    && apt update \
-    && apt install -y postgresql-18-pgvector \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/* /var/cache/* /var/log/*
-USER 26
-```
-
-```bash
-# Build and push to Azure Container Registry
-docker build -t $ACR_NAME.azurecr.io/postgresql-pgvector:18.1-pgvector \
-    -f infrastructure/cnpg-pgvector/Dockerfile .
-az acr login --name $ACR_NAME
-docker push $ACR_NAME.azurecr.io/postgresql-pgvector:18.1-pgvector
-```
-
-### Deploying the PostgreSQL Cluster via CRD
-
-The CNPG operator reads a Cluster CRD and creates the PostgreSQL pod with the specified configuration. Here is the CRD I used, with tuned PostgreSQL parameters for vector workloads:
-
-```yaml
-apiVersion: postgresql.cnpg.io/v1
-kind: Cluster
-metadata:
-  name: ml-pgvector-benchmark
-  namespace: cnpg-pgvector
-spec:
-  instances: 1
-  imageName: benchmarkregistry504646de.azurecr.io/postgresql-pgvector:18.1-pgvector
-  postgresql:
-    parameters:
-      shared_buffers: "4GB"
-      effective_cache_size: "12GB"
-      work_mem: "256MB"
-      maintenance_work_mem: "1GB"
-      max_connections: "200"
-      random_page_cost: "1.1"
-      effective_io_concurrency: "200"
-      max_parallel_workers_per_gather: "4"
-      max_parallel_workers: "8"
-      # TCP keepalives to prevent Azure Load Balancer
-      # from dropping idle connections (4 min timeout)
-      tcp_keepalives_idle: "60"
-      tcp_keepalives_interval: "10"
-      tcp_keepalives_count: "6"
-  storage:
-    size: 100Gi
-    storageClass: managed-csi-premium
-  resources:
-    requests:
-      cpu: "8"
-      memory: "32Gi"
-    limits:
-      cpu: "16"
-      memory: "64Gi"
-  bootstrap:
-    initdb:
-      database: benchmark_vectors
-      owner: benchmark_user
-      postInitSQL:
-        - CREATE EXTENSION IF NOT EXISTS vector;
-```
-
-```bash
-# Deploy the cluster
-kubectl create namespace cnpg-pgvector
-kubectl apply -f infrastructure/cnpg-pgvector/cluster.yaml
-
-# Watch it come up (takes 2-5 minutes)
-kubectl get cluster -n cnpg-pgvector -w
-```
-
-### Setting Up Prometheus and Grafana Monitoring
-
-To observe real-time CPU, memory, I/O, and PostgreSQL-specific metrics during benchmarks, I deployed the `kube-prometheus-stack` with persistent storage:
-
-```bash
-kubectl create namespace monitoring
-helm repo add prometheus-community \
-    https://prometheus-community.github.io/helm-charts
-helm repo update
-
-helm upgrade --install prometheus \
-    prometheus-community/kube-prometheus-stack \
-    --namespace monitoring \
-    -f infrastructure/cnpg-pgvector/monitoring/values-prometheus-grafana.yaml \
-    --wait --timeout 10m
-```
-
-CNPG exposes PostgreSQL metrics on port 9187 out of the box. I created a PodMonitor to tell Prometheus to scrape those metrics, and imported a custom Grafana dashboard for PostgreSQL-specific panels (cache hit ratio, active connections, WAL rate, lock contention):
-
-```bash
-# Apply custom metrics queries and PodMonitor
-kubectl apply -f infrastructure/cnpg-pgvector/monitoring/cnpg-extra-monitoring.yaml
-kubectl apply -f infrastructure/cnpg-pgvector/monitoring/cnpg-podmonitor.yaml
-
-# Import Grafana dashboard
-kubectl create configmap cnpg-pgvector-dashboard \
-    --namespace monitoring \
-    --from-file=cnpg-pgvector-overview.json=infrastructure/cnpg-pgvector/monitoring/dashboards/cnpg-pgvector-overview.json \
-    --dry-run=client -o yaml \
-    | kubectl label --local -f - grafana_dashboard=1 -o yaml \
-    | kubectl apply -f -
-
-# Access Grafana
-kubectl port-forward svc/prometheus-grafana -n monitoring 3000:80
-```
-
-### The Benchmark Engine Docker Image
-
-The benchmark suite itself is packaged as a Docker container built with `uv` for dependency management. It contains Python scripts for insert, index creation, and retrieval benchmarks, and runs as Kubernetes Jobs on the benchmark execution cluster:
-
-```dockerfile
-FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
-WORKDIR /app
-ENV UV_COMPILE_BYTECODE=1
-COPY pyproject.toml uv.lock ./
-RUN uv sync --frozen --no-install-project
-COPY src/ ./src/
-COPY README.md .
-RUN mkdir -p /app/data
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
-ENV PATH="/app/.venv/bin:$PATH"
-CMD ["python", "--version"]
-```
-
-```bash
-# Build and push the benchmark engine image
-export TAG="v5.2.6-wot-8rep"
-docker build -t $ACR_NAME.azurecr.io/benchmark-engine:$TAG \
-    -f infrastructure/docker/Dockerfile .
-docker push $ACR_NAME.azurecr.io/benchmark-engine:$TAG
-```
+- `infrastructure/cnpg-pgvector/Dockerfile` — Custom PostgreSQL 18.1 + pgvector 0.8.1 image built on the CNPG base
+- `infrastructure/cnpg-pgvector/cluster.yaml` — CNPG Cluster CRD with tuned PostgreSQL parameters for vector workloads
+- `infrastructure/cnpg-pgvector/monitoring/values-prometheus-grafana.yaml` — Helm values for the `kube-prometheus-stack` deployment for the cnpg-pgvector cluster observability
+- `infrastructure/cnpg-pgvector/monitoring/cnpg-extra-monitoring.yaml` — Custom SQL queries exposed as CNPG Prometheus metrics (cache hit ratio, connection states, lock contention, scan types)
+- `infrastructure/cnpg-pgvector/monitoring/cnpg-podmonitor.yaml` — PodMonitor telling Prometheus to scrape CNPG metrics on port 9187
+- `infrastructure/cnpg-pgvector/monitoring/dashboards/cnpg-pgvector-overview.json` — Grafana dashboard JSON with 10 panel rows covering cluster health, node resources, query performance, connections, buffer cache, checkpoints, WAL, table sizes, and I/O
+- `infrastructure/docker/Dockerfile` — Benchmark engine Docker image built with `uv` for dependency management
 
 ---
 
 ## The Dataset
 
-The benchmark dataset contains **2.5 million text chunk embeddings** from the *Wheel of Time* (WoT) book series, consisting of 1,536-dimensional vectors generated from OpenAI's embedding model. Each row contains:
+The _Wheel of Time_ (WoT) is a high fantasy book series by Robert Jordan and Brandon Sanderson, spanning **14 novels plus a prequel** — over 4.4 million words in total. I regularly use this corpus for my RAG, vector database, and generative AI experiments because of its scale and richly interconnected world-building: it produces a large number of semantically dense text chunks with natural metadata partitioning (by book, by chapter) and a wide variety of searchable concepts — characters, locations, events, and magic system terminology.
 
-- `id`: Primary key
-- `embedding`: A `vector(1536)` column
-- `content`: The original text chunk
-- `metadata`: A JSONB column containing `book_name`, `chunk_index`, and other fields
+The base dataset contains **100,105 real text chunk embeddings** generated using OpenAI's `text-embedding-ada-002` model (1,536 dimensions). To test pgvector at production scale, I synthetically expanded this to **2.5 million vectors** by duplicating text chunks with varied metadata combinations and generating synthetic embeddings, preserving the original data distribution characteristics while reaching a dataset size that stresses PostgreSQL's query planner and buffer cache.
 
-The `metadata->>'book_name'` field has **16 distinct values** (one per book), with the smallest book having 63,945 rows (2.6% of total) and the largest having 209,226 rows (8.4%).
+The benchmark uses two Parquet datasets stored in Azure Blob Storage:
 
-### Data Ingestion: PostgreSQL COPY Binary Format
+- **Vector dataset** (2.5 million rows): Each row contains the text chunk (`text`), its 1,536-dimensional embedding (`embedding`), and metadata fields (`book_name`, `chapter_number`, `chapter_title`). On insert, each row maps to a PostgreSQL table with `content text`, `metadata jsonb`, and `embedding vector(1536)` columns.
+- **Query dataset** (4,373 rows): Real questions about the Wheel of Time, each containing a `query_embedding`, extracted `keywords` for hybrid search, and a `filter_field`/`filter_value` pair for filtered search. Every query row is used across all three benchmark search patterns — vector, filtered, and hybrid — without any modification.
 
-For bulk loading 2.5 million vectors, I used PostgreSQL's COPY command with binary format, which is the recommended approach for large vector datasets. This avoids the overhead of text parsing and parameter binding that comes with standard INSERT statements.
+The `metadata->>'book_name'` field has **16 distinct values** (one per book), with the smallest book containing 63,945 rows (2.6%) and the largest containing 209,226 rows (8.4%). This uneven distribution tests the query planner's behavior across different filter selectivities.
 
-The key part of the insert script:
-
-```python
-with conn.cursor() as cur:
-    with cur.copy(
-        f"COPY {TABLE_NAME} (content, metadata, embedding) "
-        "FROM STDIN WITH (FORMAT BINARY)"
-    ) as copy:
-        copy.set_types(['text', 'jsonb', 'vector'])
-        for record in batch:
-            copy.write_row(record)
-```
-
-This approach achieves 10 to 50x faster ingestion compared to standard INSERT statements. The full 2.5 million row insert completed in approximately 27 minutes on this setup.
-
-### Index Creation
-
-Three indexes were created on the table using a dedicated index creation script:
-
-```python
-# 1. HNSW vector index for approximate nearest neighbor search
-cur.execute("SET maintenance_work_mem = '2GB';")
-cur.execute(f"""
-    CREATE INDEX ON {TABLE_NAME}
-    USING hnsw (embedding vector_cosine_ops)
-    WITH (m = 16, ef_construction = 64);
-""")
-
-# 2. B-tree expression index for metadata filtering
-cur.execute(f"""
-    CREATE INDEX ON {TABLE_NAME}
-    USING btree ((metadata->>'book_name'));
-""")
-
-# 3. GIN index for full-text search (hybrid queries)
-cur.execute(f"""
-    CREATE INDEX ON {TABLE_NAME}
-    USING gin (to_tsvector('english', content));
-""")
-```
-
-The HNSW index build on 2.5 million 1,536-dimensional vectors took approximately 4 hours and 45 minutes with `maintenance_work_mem` set to 2 GB. The B-tree and GIN indexes built much faster (seconds and minutes, respectively).
+The benchmark framework is **dataset-agnostic**: you can point it at your own Parquet files and a YAML configuration to find the exact `top_k` threshold where the planner abandons the HNSW index for your data distribution. For full dataset schemas and bring-your-own-dataset instructions, see [DATASET.md](doc/DATASET.md).
 
 ---
 
 ## The Benchmark
+
+Before running retrieval benchmarks, the data must be ingested and indexed. Data ingestion uses PostgreSQL's `COPY` command with binary format via `psycopg3`, which achieves 10 to 50x faster throughput than standard `INSERT` statements — the full 2.5 million row insert completed in approximately 27 minutes. Three indexes are then created on the table: an **HNSW index** on the embedding column for approximate nearest neighbor search (`m = 16`, `ef_construction = 64`), a **B-tree expression index** on `metadata->>'book_name'` for filtered search, and a **GIN index** on `to_tsvector('english', content)` for full-text search. The HNSW index build on 2.5 million 1,536-dimensional vectors took approximately 4 hours and 45 minutes.
 
 Each benchmark runs as a Kubernetes Job deployed via Helm. The Helm values file defines the script to run, dataset configuration, and connection parameters:
 
@@ -559,21 +388,21 @@ Pure vector search worked well across all `top_k` values. But two other search p
 
 ### Benchmark Results: pgvector CNPG (2.5M Vectors)
 
-| Search Type | top_k | Concurrency | Avg Latency (ms) | P99 Latency (ms) | QPS |
-|---|---|---|---|---|---|
-| **Vector Search** | 10 | 1 | 3.87 | 7.97 | 209.56 |
-| **Vector Search** | 10 | 50 | 12.41 | 164.53 | 1,728.87 |
-| **Vector Search** | 50 | 50 | 12.51 | 40.06 | 1,666.25 |
-| **Vector Search** | 100 | 100 | 22.28 | 76.02 | 1,697.39 |
-| **Filtered Search** | 10 | 1 | 3.66 | 6.52 | 220.83 |
-| **Filtered Search** | 10 | 50 | 12.26 | 154.01 | 1,755.72 |
-| **Filtered Search** | 20 | 50 | 10.93 | 33.09 | 1,812.04 |
-| **Filtered Search** | **50** | **1** | **44.25** | **2,422** | **21.88** |
-| **Filtered Search** | **50** | **50** | **1,915** | **22,628** | **24.85** |
-| **Filtered Search** | **100** | **100** | **3,629** | **45,629** | **24.57** |
-| **Hybrid Search** | 10 | 1 | 13.50 | 27.91 | 68.92 |
-| **Hybrid Search** | 50 | 50 | 50.72 | 183.88 | 264.24 |
-| **Hybrid Search** | 100 | 100 | 109.87 | 363.80 | 249.18 |
+| Search Type         | top_k   | Concurrency | Avg Latency (ms) | P99 Latency (ms) | QPS       |
+| ------------------- | ------- | ----------- | ---------------- | ---------------- | --------- |
+| **Vector Search**   | 10      | 1           | 3.87             | 7.97             | 209.56    |
+| **Vector Search**   | 10      | 50          | 12.41            | 164.53           | 1,728.87  |
+| **Vector Search**   | 50      | 50          | 12.51            | 40.06            | 1,666.25  |
+| **Vector Search**   | 100     | 100         | 22.28            | 76.02            | 1,697.39  |
+| **Filtered Search** | 10      | 1           | 3.66             | 6.52             | 220.83    |
+| **Filtered Search** | 10      | 50          | 12.26            | 154.01           | 1,755.72  |
+| **Filtered Search** | 20      | 50          | 10.93            | 33.09            | 1,812.04  |
+| **Filtered Search** | **50**  | **1**       | **44.25**        | **2,422**        | **21.88** |
+| **Filtered Search** | **50**  | **50**      | **1,915**        | **22,628**       | **24.85** |
+| **Filtered Search** | **100** | **100**     | **3,629**        | **45,629**       | **24.57** |
+| **Hybrid Search**   | 10      | 1           | 13.50            | 27.91            | 68.92     |
+| **Hybrid Search**   | 50      | 50          | 50.72            | 183.88           | 264.24    |
+| **Hybrid Search**   | 100     | 100         | 109.87           | 363.80           | 249.18    |
 
 The pattern is stark. Filtered search at `top_k = 20` with 50 concurrent queries: **10.93 ms** average, **1,812 QPS**. The same filtered search at `top_k = 50` with 50 concurrent queries: **1,915 ms** average, **24.85 QPS**. That is a **175x latency increase** and a **99% QPS drop** from one step in the `top_k` axis.
 
@@ -582,12 +411,17 @@ Vector search shows no such cliff and scales smoothly across all `top_k` values.
 At concurrency, the `top_k = 50` and `top_k = 100` filtered searches caused mass timeouts. The benchmark logs were filled with:
 
 ```json
-{"idx": 3992, "timeout": 160.0, "event": "query_timed_out", "level": "warning"}
+{
+  "idx": 3992,
+  "timeout": 160.0,
+  "event": "query_timed_out",
+  "level": "warning"
+}
 ```
 
 This was not a concurrency issue. Even a **single query** with `top_k = 50` took 44 ms on average, but with a **P99 of 2,422 ms**, meaning some queries took seconds while others triggered the catastrophic plan. Something fundamental had changed in how PostgreSQL executed the query.
 
-*Charts: see `doc/plots/article_filtered_search_cliff.png` for the visual representation of this cliff.*
+_Charts: see `doc/plots/article_filtered_search_cliff.png` for the visual representation of this cliff._
 
 ---
 
@@ -677,12 +511,14 @@ Step 3 is the killer. Computing cosine distance on 1,536-dimensional vectors for
 For our filtered search query, the planner considers two main strategies:
 
 **Strategy A: HNSW Index Scan + Post-Filter**
+
 - Use the HNSW index to traverse the vector graph
 - For each candidate, check if `book_name` matches
 - Stop when `LIMIT` rows are found
 - Cost depends on: how deep into the graph it needs to go before finding enough matching rows
 
 **Strategy B: B-Tree Metadata Scan + Brute-Force Sort**
+
 - Use the B-tree index on `metadata->>'book_name'` to find all matching rows
 - Fetch all matching rows from the table (heap)
 - Compute vector distance for every row, sort, take top N
@@ -701,12 +537,13 @@ At low `top_k` values, the HNSW path looks cheaper to the planner because it onl
 
 I tested the planner's decision at fine-grained `top_k` values to find the exact thresholds:
 
-| Filter Value | Matching Rows | % of Total | HNSW Used Up To | Switches At |
-|---|---|---|---|---|
-| 00. New Spring (smallest) | 63,945 | 2.6% | top_k = 40 | top_k = 45 |
-| 06. Lord of Chaos (largest) | 209,226 | 8.4% | top_k = 40 | top_k = 42 |
+| Filter Value                | Matching Rows | % of Total | HNSW Used Up To | Switches At |
+| --------------------------- | ------------- | ---------- | --------------- | ----------- |
+| 00. New Spring (smallest)   | 63,945        | 2.6%       | top_k = 40      | top_k = 45  |
+| 06. Lord of Chaos (largest) | 209,226       | 8.4%       | top_k = 40      | top_k = 42  |
 
 The threshold is remarkably consistent at around **top_k = 40 to 42** regardless of filter selectivity for this dataset. For your data, it will depend on:
+
 - Total number of rows
 - Number of rows matching the filter
 - Vector dimensionality
@@ -826,15 +663,15 @@ await conn.execute("SET enable_bitmapscan = off")
 
 ## Summary of Workaround Results
 
-| Approach | Uses HNSW? | Latency (top_k=50) | Practical? |
-|---|---|---|---|
-| Default (no changes) | No | 215,251 ms | Broken |
-| `enable_bitmapscan = off` | No | ~800 ms | Band-aid |
-| Disable all scan types | No | ~818 ms | Does not work |
-| `hnsw.ef_search = 200` | No | ~797 ms | Does not work |
-| `hnsw.iterative_scan` | No | ~795 ms | Does not work (planner ignores) |
-| Iterative scan + disable all scans | No | ~871 ms | Does not work |
-| **CTE over-fetch** | **Yes** | **~187 ms** | **Best workaround** |
+| Approach                           | Uses HNSW? | Latency (top_k=50) | Practical?                      |
+| ---------------------------------- | ---------- | ------------------ | ------------------------------- |
+| Default (no changes)               | No         | 215,251 ms         | Broken                          |
+| `enable_bitmapscan = off`          | No         | ~800 ms            | Band-aid                        |
+| Disable all scan types             | No         | ~818 ms            | Does not work                   |
+| `hnsw.ef_search = 200`             | No         | ~797 ms            | Does not work                   |
+| `hnsw.iterative_scan`              | No         | ~795 ms            | Does not work (planner ignores) |
+| Iterative scan + disable all scans | No         | ~871 ms            | Does not work                   |
+| **CTE over-fetch**                 | **Yes**    | **~187 ms**        | **Best workaround**             |
 
 ---
 
@@ -847,6 +684,7 @@ To identify the bottleneck, I ran `EXPLAIN ANALYZE` on each component of the hyb
 ### Decomposing the Hybrid Query
 
 The hybrid search query has four logical parts:
+
 1. **Vector CTE**: Pure HNSW vector search to find nearest neighbors
 2. **Text CTE**: GIN-based full-text search with `ts_rank()` scoring
 3. **FULL OUTER JOIN**: Merge vector and text results by row ID
@@ -854,13 +692,13 @@ The hybrid search query has four logical parts:
 
 I benchmarked each part independently (5 runs each, median latency, single connection, warm cache):
 
-| Component | Median Latency | What It Does |
-|---|---|---|
-| **Pure vector search** (LIMIT 10) | **188 ms** | HNSW index scan, returns 10 rows |
-| **Vector CTE with ROW_NUMBER** (LIMIT 20) | **190 ms** | Same HNSW scan + window function (negligible overhead) |
-| **Text search CTE alone** (LIMIT 20) | **1,442 ms** | GIN bitmap scan on 76,198 matching rows + ts_rank on all + sort |
-| **Full hybrid RRF** (top_k=10) | **1,605 ms** | Both CTEs + FULL OUTER JOIN + RRF sort |
-| **Full hybrid RRF** (top_k=50) | **1,629 ms** | Same, slightly larger LIMIT |
+| Component                                 | Median Latency | What It Does                                                    |
+| ----------------------------------------- | -------------- | --------------------------------------------------------------- |
+| **Pure vector search** (LIMIT 10)         | **188 ms**     | HNSW index scan, returns 10 rows                                |
+| **Vector CTE with ROW_NUMBER** (LIMIT 20) | **190 ms**     | Same HNSW scan + window function (negligible overhead)          |
+| **Text search CTE alone** (LIMIT 20)      | **1,442 ms**   | GIN bitmap scan on 76,198 matching rows + ts_rank on all + sort |
+| **Full hybrid RRF** (top_k=10)            | **1,605 ms**   | Both CTEs + FULL OUTER JOIN + RRF sort                          |
+| **Full hybrid RRF** (top_k=50)            | **1,629 ms**   | Same, slightly larger LIMIT                                     |
 
 The answer is immediately clear: **the text search CTE alone takes 1,442 ms, which accounts for roughly 90% of the total hybrid query time**. The vector CTE, the FULL OUTER JOIN, and the RRF computation together add only about 160 ms on top.
 
@@ -906,6 +744,7 @@ flowchart TD
 ```
 
 The bottleneck is steps 2 and 3. Even with 4 parallel workers, PostgreSQL must:
+
 - **Fetch every one of the 76,198 matching rows** from the heap (the actual table pages)
 - **Compute `ts_rank()` on each row**, which involves re-tokenizing the `content` text column at query time
 - **Sort all 76,198 scored rows** just to return the top 20
@@ -988,9 +827,9 @@ Neither issue is a bug in pgvector or PostgreSQL. They are architectural consequ
 
 ---
 
-*All benchmark code, Kubernetes configurations, and diagnostic scripts referenced in this article are available in this repository.*
+_All benchmark code, Kubernetes configurations, and diagnostic scripts referenced in this article are available in this repository._
 
-*Infrastructure: Azure AKS with CloudNativePG operator, PostgreSQL 18.1, pgvector 0.8.1, Standard_D16s_v3 nodes (16 vCPU, 64 GB RAM), 100 GB Azure Premium SSD.*
+_Infrastructure: Azure AKS with CloudNativePG operator, PostgreSQL 18.1, pgvector 0.8.1, Standard_D16s_v3 nodes (16 vCPU, 64 GB RAM), 100 GB Azure Premium SSD._
 
 ---
 
