@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "benchmark-engine.fullname" . }}
+  labels:
+    {{- include "benchmark-engine.labels" . | nindent 4 }}
+data:
+  TEST_LOCATION: {{ .Values.env.TEST_LOCATION | quote }}
+  DATASET_SIZE: {{ .Values.env.DATASET_SIZE | quote }}
+  BENCHMARK_NUM_QUERIES: {{ .Values.env.BENCHMARK_NUM_QUERIES | quote }}
+  DATA_FILE: {{ .Values.env.DATA_FILE | quote }}
+  BATCH_SIZES: {{ .Values.env.BATCH_SIZES | quote }}
+  COLLECTION_NAME: {{ .Values.env.COLLECTION_NAME | quote }}
+  
+  # Results DB
+  PG_PORT: {{ .Values.env.PG_PORT | quote }}
+  PG_DATABASE: {{ .Values.env.PG_DATABASE | quote }}
+  PG_USER: {{ .Values.env.PG_USER | quote }}
+
+  # Allow passing arbitrary extra env vars via values.yaml if needed
+  {{- range $key, $val := .Values.env }}
+  {{- if and (ne $key "TEST_LOCATION") (ne $key "DATASET_SIZE") (ne $key "BENCHMARK_NUM_QUERIES") (ne $key "DATA_FILE") (ne $key "BATCH_SIZES") (ne $key "COLLECTION_NAME") (ne $key "PG_PORT") (ne $key "PG_DATABASE") (ne $key "PG_USER") }}
+  {{ $key }}: {{ $val | quote }}
+  {{- end }}
+  {{- end }}

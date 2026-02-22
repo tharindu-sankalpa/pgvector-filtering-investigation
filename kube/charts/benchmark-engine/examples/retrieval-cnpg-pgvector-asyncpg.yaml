@@ -1,0 +1,53 @@
+# Retrieval Benchmark for CNPG PostgreSQL (pgvector) Self-Hosted - AsyncPG Driver - WoT Dataset 2.5M
+# Usage: helm install cnpg-pg-retrieval-asyncpg-wot-2m5 ./benchmark-engine -f examples/retrieval-cnpg-pgvector-asyncpg.yaml
+#
+# Prerequisites:
+# 1. Data inserted and indexes created on CNPG cluster
+# 2. cnpg-pgvector-secrets and pg-results-secrets exist on benchmark-execution-aks
+
+command: ["python", "src/pgvector/03_retrieval_asyncpg.py"]
+
+env:
+  TEST_LOCATION: "AKS North Europe"
+  DATASET_SIZE: "2500000"
+
+  # WoT Dataset Configuration - 2.5M table
+  QUERY_FILE: "/app/data/wot_retrieval_queries.parquet"
+  TABLE_NAME: "wot_chunks_2_5m"
+
+  # Benchmark parameters
+  BENCHMARK_NUM_QUERIES: "4373"
+  CONCURRENCY_LEVELS: "1,2,4,8,16,32,50,100"
+  TOP_K_VALUES: "1,5,10,20,50,100"
+
+  # Direct PostgreSQL port (no PgBouncer on CNPG)
+  PG_PORT_DIRECT: "5432"
+
+  # CNPG connection overrides (PG_HOST and PG_PASSWORD come from cnpg-pgvector-secrets)
+  PG_USER: "benchmark_user"
+  PG_PORT: "5432"
+  PGSSLMODE: "require"
+
+  # CNPG uses a single database for vector data
+  VECTOR_PG_DATABASE: "benchmark_vectors"
+
+  # Reporting Overrides
+  DATABASE_NAME_OVERRIDE: "PostgreSQL CNPG Self-Hosted"
+  DATABASE_CONFIG: "D16s_v3 16vCPU 64GB | asyncpg - WoT Dataset 2.5M"
+
+  # Results database (Azure Managed PG - separate from CNPG vector DB)
+  RESULTS_PG_HOST: "pgvector-benchmark-server.postgres.database.azure.com"
+  RESULTS_PG_USER: "mlsvc_pgvector_admin"
+  RESULTS_PG_DATABASE: "benchmark_results"
+
+externalSecrets:
+  - name: pg-results-secrets
+  - name: cnpg-pgvector-secrets
+
+resources:
+  requests:
+    cpu: 2000m
+    memory: 4Gi
+  limits:
+    cpu: 4000m
+    memory: 8Gi

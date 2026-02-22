@@ -1,0 +1,54 @@
+# Insert Benchmark for CNPG PostgreSQL (pgvector) Self-Hosted - WoT Dataset 2.5M
+# Usage: helm install cnpg-pg-insert-wot-2m5 ./benchmark-engine -f examples/insert-cnpg-pgvector.yaml
+#
+# NOTE: Uses chunked loading (INSERT_CHUNK_SIZE) to stay within pod memory limits.
+# The 2.5M dataset (~22GB parquet) is streamed from disk in 100K-row chunks.
+#
+# Prerequisites:
+# 1. CNPG cluster deployed on aks-cnpg-pgvector with LoadBalancer exposed
+# 2. Secret created on benchmark-execution-aks:
+#    kubectl create secret generic cnpg-pgvector-secrets --from-literal=PG_HOST="<LB_IP>" --from-literal=PG_PASSWORD="<password>"
+# 3. pg-results-secrets exists for results database
+
+command: ["python", "src/pgvector/01_insert_benchmark.py"]
+
+env:
+  TEST_LOCATION: "AKS North Europe"
+  DATASET_SIZE: "2500000"
+
+  # WoT Dataset Configuration (2.5M synthetic)
+  DATA_FILE: "/app/data/gen_wot_2.5m.parquet"
+  TABLE_NAME: "wot_chunks_2_5m"
+  BATCH_SIZES: "[5000]"
+
+  # Chunked loading: read 100K rows at a time from disk
+  INSERT_CHUNK_SIZE: "100000"
+
+  # CNPG connection overrides (PG_HOST and PG_PASSWORD come from cnpg-pgvector-secrets)
+  PG_USER: "benchmark_user"
+  PG_PORT: "5432"
+  PGSSLMODE: "require"
+
+  # CNPG uses a single database for vector data (not the Azure PG "vector_data" split)
+  VECTOR_PG_DATABASE: "benchmark_vectors"
+
+  # Reporting Overrides
+  DATABASE_NAME_OVERRIDE: "PostgreSQL CNPG Self-Hosted"
+  DATABASE_CONFIG: "D16s_v3 16vCPU 64GB - WoT Dataset 2.5M"
+
+  # Results database (Azure Managed PG - separate from CNPG vector DB)
+  RESULTS_PG_HOST: "pgvector-benchmark-server.postgres.database.azure.com"
+  RESULTS_PG_USER: "mlsvc_pgvector_admin"
+  RESULTS_PG_DATABASE: "benchmark_results"
+
+externalSecrets:
+  - name: pg-results-secrets
+  - name: cnpg-pgvector-secrets
+
+resources:
+  requests:
+    cpu: 2000m
+    memory: 4Gi
+  limits:
+    cpu: 4000m
+    memory: 8Gi

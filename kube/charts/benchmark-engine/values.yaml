@@ -1,0 +1,111 @@
+# Default values for benchmark-engine.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+image:
+  repository: benchmarkregistry504646de.azurecr.io/benchmark-engine
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: "latest"
+
+imagePullSecrets:
+  - name: acr-secret
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: false
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name: "default"
+
+podAnnotations: {}
+
+podSecurityContext: {}
+  # fsGroup: 2000
+
+securityContext: {}
+  # capabilities:
+  #   drop:
+  #   - ALL
+  # readOnlyRootFilesystem: true
+  # runAsNonRoot: true
+  # runAsUser: 1000
+
+resources:
+  # We recommend strictly defining these for benchmark isolation
+  limits:
+    cpu: 2000m
+    memory: 8Gi
+  requests:
+    cpu: 1000m
+    memory: 4Gi
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Benchmark Specific Configuration
+
+# Command to run (mandatory override via set or values file recommended)
+# e.g. ["python", "src/milvus/01_insert_benchmark.py"]
+command: []
+
+# Path to the dataset within the container (mounted via PVC)
+dataset:
+  pvcName: benchmark-dataset-pvc
+  mountPath: /app/data
+  readOnly: true  # Set to false for data generation jobs that need to write to PVC
+  # The filename is usually passed as an env var, see 'env' section
+
+# Environment variables to pass to the job
+# Can be key-value pairs or structured data
+env:
+  TEST_LOCATION: "AKS North Europe"
+
+  # ==========================================================================
+  # Dataset Configuration (WoT Dataset - Default)
+  # ==========================================================================
+  DATASET_SIZE: "100105"
+  BENCHMARK_NUM_QUERIES: "1000"
+
+  # Data file path (embeddings dataset)
+  DATA_FILE: "/app/data/wot_chunks_with_embeddings_100pct.parquet"
+
+  # Query file path (for retrieval benchmarks)
+  QUERY_FILE: "/app/data/wot_retrieval_queries.parquet"
+
+  # Batch sizes as JSON string
+  BATCH_SIZES: "[50, 100, 200, 500, 1000, 2000, 5000]"
+
+  # Collection/Table name in target databases
+  COLLECTION_NAME: "wot_chunks"
+
+  # ==========================================================================
+  # Results Database Configuration (Separated from Vector Data)
+  # ==========================================================================
+  # Results database stores benchmark metrics only
+  PG_PORT: "5432"
+  PG_HOST: "pgvector-benchmark-server.postgres.database.azure.com"
+  PG_USER: "mlsvc_pgvector_admin"
+
+  # New results database (Phase 4 refactoring)
+  PG_DATABASE: "benchmark_results"
+  RESULTS_PG_DATABASE: "benchmark_results"
+
+  # Vector database for pgvector benchmarks (Phase 4 refactoring)
+  VECTOR_PG_DATABASE: "vector_data"
+
+# Secrets to load environment variables from
+# Each entry is a k8s secret name. All keys in that secret will be loaded as env vars.
+externalSecrets:
+  - name: milvus-secrets
+  - name: mongo-secrets
+  - name: pg-results-secrets
+  - name: pgvector-secrets
+  - name: azure-search-secrets

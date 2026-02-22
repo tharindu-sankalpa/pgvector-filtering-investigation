@@ -1,0 +1,62 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "benchmark-engine.fullname" . }}
+  labels:
+    {{- include "benchmark-engine.labels" . | nindent 4 }}
+spec:
+  backoffLimit: 0 # Don't retry automatically for benchmarks, we want to know if it fails
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "benchmark-engine.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ .Values.serviceAccount.name | default (include "benchmark-engine.fullname" .) }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: 
+            {{- toYaml .Values.command | nindent 12 }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "benchmark-engine.fullname" . }}
+            {{- range .Values.externalSecrets }}
+            - secretRef:
+                name: {{ .name }}
+            {{- end }}
+          volumeMounts:
+            - name: dataset-storage
+              mountPath: {{ .Values.dataset.mountPath }}
+              readOnly: {{ if hasKey .Values.dataset "readOnly" }}{{ .Values.dataset.readOnly }}{{ else }}true{{ end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      restartPolicy: Never
+      volumes:
+        - name: dataset-storage
+          persistentVolumeClaim:
+            claimName: {{ .Values.dataset.pvcName }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

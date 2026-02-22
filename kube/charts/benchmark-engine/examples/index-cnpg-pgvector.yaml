@@ -1,0 +1,44 @@
+# Index Creation for CNPG PostgreSQL (pgvector) Self-Hosted - WoT Dataset 2.5M
+# Usage: helm install cnpg-pg-index-wot-2m5 ./benchmark-engine -f examples/index-cnpg-pgvector.yaml
+#
+# Prerequisites:
+# 1. Data inserted via insert-cnpg-pgvector.yaml
+# 2. cnpg-pgvector-secrets and pg-results-secrets exist on benchmark-execution-aks
+
+command: ["python", "src/pgvector/02_create_indexes.py"]
+
+env:
+  TEST_LOCATION: "AKS North Europe"
+  DATASET_SIZE: "2500000"
+
+  # WoT Dataset Configuration (2.5M synthetic)
+  TABLE_NAME: "wot_chunks_2_5m"
+
+  # CNPG connection overrides (PG_HOST and PG_PASSWORD come from cnpg-pgvector-secrets)
+  PG_USER: "benchmark_user"
+  PG_PORT: "5432"
+  PGSSLMODE: "require"
+
+  # CNPG uses a single database for vector data
+  VECTOR_PG_DATABASE: "benchmark_vectors"
+
+  # Reporting Overrides
+  DATABASE_NAME_OVERRIDE: "PostgreSQL CNPG Self-Hosted"
+  DATABASE_CONFIG: "D16s_v3 16vCPU 64GB - WoT Dataset 2.5M"
+
+  # Results database (Azure Managed PG - separate from CNPG vector DB)
+  RESULTS_PG_HOST: "pgvector-benchmark-server.postgres.database.azure.com"
+  RESULTS_PG_USER: "mlsvc_pgvector_admin"
+  RESULTS_PG_DATABASE: "benchmark_results"
+
+externalSecrets:
+  - name: pg-results-secrets
+  - name: cnpg-pgvector-secrets
+
+resources:
+  requests:
+    cpu: 4000m
+    memory: 16Gi
+  limits:
+    cpu: 8000m
+    memory: 32Gi
