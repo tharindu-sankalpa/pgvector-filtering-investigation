@@ -125,13 +125,30 @@ Each guide is self-contained with exact commands, expected outputs, and troubles
 
 **Key infrastructure files referenced by these guides:**
 
-- `infrastructure/cnpg-pgvector/Dockerfile` — Custom PostgreSQL 18.1 + pgvector 0.8.1 image built on the CNPG base
-- `infrastructure/cnpg-pgvector/cluster.yaml` — CNPG Cluster CRD with tuned PostgreSQL parameters for vector workloads
-- `infrastructure/cnpg-pgvector/monitoring/values-prometheus-grafana.yaml` — Helm values for the `kube-prometheus-stack` deployment for the cnpg-pgvector cluster observability
-- `infrastructure/cnpg-pgvector/monitoring/cnpg-extra-monitoring.yaml` — Custom SQL queries exposed as CNPG Prometheus metrics (cache hit ratio, connection states, lock contention, scan types)
-- `infrastructure/cnpg-pgvector/monitoring/cnpg-podmonitor.yaml` — PodMonitor telling Prometheus to scrape CNPG metrics on port 9187
-- `infrastructure/cnpg-pgvector/monitoring/dashboards/cnpg-pgvector-overview.json` — Grafana dashboard JSON with 10 panel rows covering cluster health, node resources, query performance, connections, buffer cache, checkpoints, WAL, table sizes, and I/O
-- `infrastructure/docker/Dockerfile` — Benchmark engine Docker image built with `uv` for dependency management
+- [**Dockerfile**](infrastructure/cnpg-pgvector/Dockerfile) (`infrastructure/cnpg-pgvector/`) — Custom PostgreSQL 18.1 + pgvector 0.8.1 image built on the CNPG base
+- [**cluster.yaml**](infrastructure/cnpg-pgvector/cluster.yaml) (`infrastructure/cnpg-pgvector/`) — CNPG Cluster CRD with tuned PostgreSQL parameters for vector workloads
+- [**values-prometheus-grafana.yaml**](infrastructure/cnpg-pgvector/monitoring/values-prometheus-grafana.yaml) (`infrastructure/cnpg-pgvector/monitoring/`) — Helm values for the `kube-prometheus-stack` deployment for the cnpg-pgvector cluster observability
+- [**cnpg-extra-monitoring.yaml**](infrastructure/cnpg-pgvector/monitoring/cnpg-extra-monitoring.yaml) (`infrastructure/cnpg-pgvector/monitoring/`) — Custom SQL queries exposed as CNPG Prometheus metrics (cache hit ratio, connection states, lock contention, scan types)
+- [**cnpg-podmonitor.yaml**](infrastructure/cnpg-pgvector/monitoring/cnpg-podmonitor.yaml) (`infrastructure/cnpg-pgvector/monitoring/`) — PodMonitor telling Prometheus to scrape CNPG metrics on port 9187
+- [**cnpg-pgvector-overview.json**](infrastructure/cnpg-pgvector/monitoring/dashboards/cnpg-pgvector-overview.json) (`infrastructure/cnpg-pgvector/monitoring/dashboards/`) — Grafana dashboard JSON with 10 panel rows covering cluster health, node resources, query performance, connections, buffer cache, checkpoints, WAL, table sizes, and I/O
+- [**Dockerfile**](infrastructure/docker/Dockerfile) (`infrastructure/docker/`) — Benchmark engine Docker image built with `uv` for dependency management
+
+**Helm chart and Kubernetes manifests:**
+
+The benchmark engine is deployed as Kubernetes Jobs using a custom Helm chart. The chart creates a Job with a ConfigMap for environment variables, mounts the dataset PVC, and injects secrets for database connectivity. Different benchmark scenarios are configured through example values files that override the chart defaults:
+
+- [**Chart.yaml**](kube/charts/benchmark-engine/Chart.yaml) — Helm chart metadata
+- [**values.yaml**](kube/charts/benchmark-engine/values.yaml) — Default chart values: image config, resource limits (2 CPU / 8 GB), dataset PVC mount, environment variables (dataset paths, batch sizes, results database config), and external secrets references
+- [**job.yaml**](kube/charts/benchmark-engine/templates/job.yaml) — Job template that wires the container command, ConfigMap envFrom, secret envFrom, and PVC volume mount
+- [**configmap.yaml**](kube/charts/benchmark-engine/templates/configmap.yaml) — ConfigMap template that merges all `env` values into a single Kubernetes ConfigMap
+- [**pvc.yaml**](kube/pvc.yaml) — PersistentVolume and PersistentVolumeClaim for mounting Azure Files storage into benchmark pods
+
+**Example values files** (each overrides the defaults for a specific benchmark scenario):
+
+- [**insert-cnpg-pgvector.yaml**](kube/charts/benchmark-engine/examples/insert-cnpg-pgvector.yaml) — Standard row-by-row INSERT benchmark
+- [**insert-cnpg-pgvector-copy.yaml**](kube/charts/benchmark-engine/examples/insert-cnpg-pgvector-copy.yaml) — Binary `COPY` INSERT benchmark (10-50x faster, recommended for 2.5M scale)
+- [**index-cnpg-pgvector.yaml**](kube/charts/benchmark-engine/examples/index-cnpg-pgvector.yaml) — HNSW + B-tree + GIN index creation
+- [**retrieval-cnpg-pgvector-asyncpg.yaml**](kube/charts/benchmark-engine/examples/retrieval-cnpg-pgvector-asyncpg.yaml) — Vector, filtered, and hybrid search retrieval benchmark using asyncpg
 
 ---
 
@@ -155,6 +172,17 @@ The benchmark framework is **dataset-agnostic**: you can point it at your own Pa
 ## The Benchmark
 
 Before running retrieval benchmarks, the data must be ingested and indexed. Data ingestion uses PostgreSQL's `COPY` command with binary format via `psycopg3`, which achieves 10 to 50x faster throughput than standard `INSERT` statements — the full 2.5 million row insert completed in approximately 27 minutes. Three indexes are then created on the table: an **HNSW index** on the embedding column for approximate nearest neighbor search (`m = 16`, `ef_construction = 64`), a **B-tree expression index** on `metadata->>'book_name'` for filtered search, and a **GIN index** on `to_tsvector('english', content)` for full-text search. The HNSW index build on 2.5 million 1,536-dimensional vectors took approximately 4 hours and 45 minutes.
+
+**Benchmark scripts** (`src/pgvector/`):
+
+- [**01_insert_benchmark_copy.py**](src/pgvector/01_insert_benchmark_copy.py) — Bulk data ingestion using PostgreSQL's binary `COPY` protocol via psycopg3. Sets up the database table (`CREATE TABLE` with `content text`, `metadata jsonb`, `embedding vector(1536)`), loads Parquet data in configurable chunks, and streams rows to PostgreSQL. This is the recommended insert method for large datasets.
+- [**01_insert_benchmark.py**](src/pgvector/01_insert_benchmark.py) — Standard row-by-row `INSERT` benchmark for cross-database comparison (matches the insert pattern used with Milvus and MongoDB benchmarks).
+- [**02_create_indexes.py**](src/pgvector/02_create_indexes.py) — Creates HNSW, B-tree, and GIN indexes with configurable parameters. Measures and logs index build times to the results database for each index type.
+- [**03_retrieval_asyncpg.py**](src/pgvector/03_retrieval_asyncpg.py) — Primary retrieval benchmark using the asyncpg driver. Runs all three search patterns (vector, filtered, hybrid) across configurable concurrency levels and `top_k` values, measuring QPS and latency percentiles (p50, p95, p99). Uses connection pooling with `asyncpg.create_pool()`.
+- [**03_retrieval_psycopg3_async.py**](src/pgvector/03_retrieval_psycopg3_async.py) — Retrieval benchmark using psycopg3's async interface, for driver comparison against asyncpg.
+- [**03_retrieval_psycopg3_sync.py**](src/pgvector/03_retrieval_psycopg3_sync.py) — Synchronous retrieval benchmark using psycopg3, for baseline comparison without async overhead.
+- [**03_retrieval_psycopg2_sync.py**](src/pgvector/03_retrieval_psycopg2_sync.py) — Synchronous retrieval benchmark using psycopg2, the most widely-used PostgreSQL driver.
+- [**common.py**](src/pgvector/common.py) — Shared configuration module: database connection management, SQL query templates for all three search patterns (vector, filtered, hybrid), environment variable handling, and connection pool sizing.
 
 Each benchmark runs as a Kubernetes Job deployed via Helm. The Helm values file defines the script to run, dataset configuration, and connection parameters:
 
@@ -181,7 +209,7 @@ helm install cnpg-pg-retrieval-asyncpg-wot-2m5 \
     --set image.tag=$TAG
 ```
 
-The retrieval benchmark tests three search patterns at varying concurrency levels (1, 2, 4, 8, 16, 32, 50, 100 concurrent queries) and `top_k` values (1, 5, 10, 20, 50, 100):
+The retrieval benchmark ([03_retrieval_asyncpg.py](src/pgvector/03_retrieval_asyncpg.py)) tests three search patterns at varying concurrency levels (1, 2, 4, 8, 16, 32, 50, 100 concurrent queries) and `top_k` values (1, 5, 10, 20, 50, 100):
 
 ### 1. Vector Search (Pure ANN)
 
