@@ -1,0 +1,92 @@
+# CNPG PostgreSQL Cluster with pgVector for ML Team Benchmarking
+# Deploy after installing CNPG operator
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: ml-pgvector-benchmark
+  namespace: cnpg-pgvector
+spec:
+  # Number of instances (1 primary + N-1 replicas)
+  # Start with 1 for benchmarking, increase for HA testing
+  instances: 1
+  
+  # Custom PostgreSQL image with pgVector
+  # UPDATE THIS after building and pushing your image
+  imageName: benchmarkregistry504646de.azurecr.io/postgresql-pgvector:18.1-pgvector
+  
+  # Pull secret for ACR
+  imagePullSecrets:
+    - name: acr-secret
+  
+  # PostgreSQL configuration
+  postgresql:
+    # Load pgVector extension
+    shared_preload_libraries: []
+    parameters:
+      # Memory settings - adjust based on node size
+      shared_buffers: "4GB"
+      effective_cache_size: "12GB"
+      work_mem: "256MB"
+      maintenance_work_mem: "1GB"
+      
+      # Connection settings
+      max_connections: "200"
+      
+      # TCP keepalives — required to prevent Azure Load Balancer (4min idle timeout)
+      # from silently dropping long-running connections
+      tcp_keepalives_idle: "60"
+      tcp_keepalives_interval: "10"
+      tcp_keepalives_count: "6"
+      
+      # WAL settings
+      wal_buffers: "64MB"
+      
+      # Query planner
+      random_page_cost: "1.1"
+      effective_io_concurrency: "200"
+      
+      # Parallel query settings
+      max_parallel_workers_per_gather: "4"
+      max_parallel_workers: "8"
+      max_parallel_maintenance_workers: "4"
+      
+      # HNSW index building (pgvector specific)
+      # Higher values = better index quality but slower build
+      # maintenance_work_mem affects HNSW build performance
+  
+  # Storage configuration
+  storage:
+    size: 100Gi
+    storageClass: managed-csi-premium  # Azure Premium SSD
+  
+  # Resource limits - adjust based on your benchmarking needs
+  # These match the Azure PostgreSQL D16ds_v5 (16 vCores, 64GB) used in original benchmarks
+  resources:
+    requests:
+      cpu: "8"
+      memory: "32Gi"
+    limits:
+      cpu: "16"
+      memory: "64Gi"
+  
+  # Superuser access for benchmarking (disable in production)
+  enableSuperuserAccess: true
+  
+  # Monitoring - PodMonitor is created separately (see cnpg-podmonitor.yaml)
+  monitoring:
+    enablePodMonitor: false
+    customQueriesConfigMap:
+      - name: cnpg-extra-monitoring
+        key: queries
+  
+  # Bootstrap - create initial database
+  bootstrap:
+    initdb:
+      database: benchmark_vectors
+      owner: benchmark_user
+      encoding: UTF8
+      localeCType: C
+      localeCollate: C
+      # Enable pgVector extension on database creation
+      postInitSQL:
+        - CREATE EXTENSION IF NOT EXISTS vector;
