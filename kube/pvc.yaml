@@ -1,0 +1,44 @@
+# pvc.yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: benchmark-dataset-pv
+spec:
+  capacity:
+    storage: 100Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: azurefile-csi
+  csi:
+    driver: file.csi.azure.com
+    readOnly: false
+    volumeHandle: milvus-rg_benchdata792fda32_benchmark-data # Unique ID
+    volumeAttributes:
+      resourceGroup: milvus-rg
+      shareName: benchmark-data
+    nodeStageSecretRef:
+      name: azure-secret
+      namespace: default
+  mountOptions:
+    - dir_mode=0777
+    - file_mode=0777
+    - uid=1000
+    - gid=1000
+    - mfsymlinks
+    - cache=strict
+    - nosharesock
+    - actimeo=30
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: benchmark-dataset-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: azurefile-csi
+  resources:
+    requests:
+      storage: 100Gi
+  volumeName: benchmark-dataset-pv
