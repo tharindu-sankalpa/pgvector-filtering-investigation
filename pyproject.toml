@@ -1,0 +1,19 @@
+[project]
+name = "pgvector-filtering-investigation"
+version = "0.1.0"
+description = "Investigation into pgvector filtered search performance cliff and hybrid search bottleneck at scale"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.3.4",
+    "pandas>=2.3.3",
+    "pyarrow>=22.0.0",
+    "psycopg2-binary>=2.9.11",
+    "psycopg[binary,pool]>=3.1.0",
+    "pgvector>=0.4.2",
+    "python-dotenv>=1.0.0",
+    "structlog>=24.1.0",
+    "asyncpg>=0.31.0",
+    "matplotlib>=3.10.8",
+    "pyyaml>=6.0.0",
+]
