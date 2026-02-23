@@ -133,23 +133,6 @@ Each guide is self-contained with exact commands, expected outputs, and troubles
 - [**cnpg-pgvector-overview.json**](infrastructure/cnpg-pgvector/monitoring/dashboards/cnpg-pgvector-overview.json) (`infrastructure/cnpg-pgvector/monitoring/dashboards/`) — Grafana dashboard JSON with 10 panel rows covering cluster health, node resources, query performance, connections, buffer cache, checkpoints, WAL, table sizes, and I/O
 - [**Dockerfile**](infrastructure/docker/Dockerfile) (`infrastructure/docker/`) — Benchmark engine Docker image built with `uv` for dependency management
 
-**Helm chart and Kubernetes manifests:**
-
-The benchmark engine is deployed as Kubernetes Jobs using a custom Helm chart. The chart creates a Job with a ConfigMap for environment variables, mounts the dataset PVC, and injects secrets for database connectivity. Different benchmark scenarios are configured through example values files that override the chart defaults:
-
-- [**Chart.yaml**](kube/charts/benchmark-engine/Chart.yaml) — Helm chart metadata
-- [**values.yaml**](kube/charts/benchmark-engine/values.yaml) — Default chart values: image config, resource limits (2 CPU / 8 GB), dataset PVC mount, environment variables (dataset paths, batch sizes, results database config), and external secrets references
-- [**job.yaml**](kube/charts/benchmark-engine/templates/job.yaml) — Job template that wires the container command, ConfigMap envFrom, secret envFrom, and PVC volume mount
-- [**configmap.yaml**](kube/charts/benchmark-engine/templates/configmap.yaml) — ConfigMap template that merges all `env` values into a single Kubernetes ConfigMap
-- [**pvc.yaml**](kube/pvc.yaml) — PersistentVolume and PersistentVolumeClaim for mounting Azure Files storage into benchmark pods
-
-**Example values files** (each overrides the defaults for a specific benchmark scenario):
-
-- [**insert-cnpg-pgvector.yaml**](kube/charts/benchmark-engine/examples/insert-cnpg-pgvector.yaml) — Standard row-by-row INSERT benchmark
-- [**insert-cnpg-pgvector-copy.yaml**](kube/charts/benchmark-engine/examples/insert-cnpg-pgvector-copy.yaml) — Binary `COPY` INSERT benchmark (10-50x faster, recommended for 2.5M scale)
-- [**index-cnpg-pgvector.yaml**](kube/charts/benchmark-engine/examples/index-cnpg-pgvector.yaml) — HNSW + B-tree + GIN index creation
-- [**retrieval-cnpg-pgvector-asyncpg.yaml**](kube/charts/benchmark-engine/examples/retrieval-cnpg-pgvector-asyncpg.yaml) — Vector, filtered, and hybrid search retrieval benchmark using asyncpg
-
 ---
 
 ## The Dataset
@@ -183,6 +166,23 @@ Before running retrieval benchmarks, the data must be ingested and indexed. Data
 - [**03_retrieval_psycopg3_sync.py**](src/pgvector/03_retrieval_psycopg3_sync.py) — Synchronous retrieval benchmark using psycopg3, for baseline comparison without async overhead.
 - [**03_retrieval_psycopg2_sync.py**](src/pgvector/03_retrieval_psycopg2_sync.py) — Synchronous retrieval benchmark using psycopg2, the most widely-used PostgreSQL driver.
 - [**common.py**](src/pgvector/common.py) — Shared configuration module: database connection management, SQL query templates for all three search patterns (vector, filtered, hybrid), environment variable handling, and connection pool sizing.
+
+**Helm chart and Kubernetes manifests:**
+
+The benchmark engine is deployed as Kubernetes Jobs using a custom Helm chart. The chart creates a Job with a ConfigMap for environment variables, mounts the dataset PVC, and injects secrets for database connectivity. Different benchmark scenarios are configured through example values files that override the chart defaults:
+
+- [**Chart.yaml**](kube/charts/benchmark-engine/Chart.yaml) — Helm chart metadata
+- [**values.yaml**](kube/charts/benchmark-engine/values.yaml) — Default chart values: image config, resource limits (2 CPU / 8 GB), dataset PVC mount, environment variables (dataset paths, batch sizes, results database config), and external secrets references
+- [**job.yaml**](kube/charts/benchmark-engine/templates/job.yaml) — Job template that wires the container command, ConfigMap envFrom, secret envFrom, and PVC volume mount
+- [**configmap.yaml**](kube/charts/benchmark-engine/templates/configmap.yaml) — ConfigMap template that merges all `env` values into a single Kubernetes ConfigMap
+- [**pvc.yaml**](kube/pvc.yaml) — PersistentVolume and PersistentVolumeClaim for mounting Azure Files storage into benchmark pods
+
+**Example values files** (each overrides the defaults for a specific benchmark scenario):
+
+- [**insert-cnpg-pgvector.yaml**](kube/charts/benchmark-engine/examples/insert-cnpg-pgvector.yaml) — Standard row-by-row INSERT benchmark
+- [**insert-cnpg-pgvector-copy.yaml**](kube/charts/benchmark-engine/examples/insert-cnpg-pgvector-copy.yaml) — Binary `COPY` INSERT benchmark (10-50x faster, recommended for 2.5M scale)
+- [**index-cnpg-pgvector.yaml**](kube/charts/benchmark-engine/examples/index-cnpg-pgvector.yaml) — HNSW + B-tree + GIN index creation
+- [**retrieval-cnpg-pgvector-asyncpg.yaml**](kube/charts/benchmark-engine/examples/retrieval-cnpg-pgvector-asyncpg.yaml) — Vector, filtered, and hybrid search retrieval benchmark using asyncpg
 
 Each benchmark runs as a Kubernetes Job deployed via Helm. The Helm values file defines the script to run, dataset configuration, and connection parameters:
 
