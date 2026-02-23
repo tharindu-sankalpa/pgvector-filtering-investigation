@@ -1,6 +1,6 @@
-# The Hidden Performance Cliff in pgvector: How PostgreSQL's Query Planner Breaks Filtered Vector Search at Scale
+# Cloud-Native PostgreSQL as a Production Vector Database on Kubernetes: Infrastructure, Hidden Performance Traps, and Workarounds
 
-_A deep investigation into why pgvector's filtered search degrades by 99% beyond a specific `top_k` threshold, and what you can do about it._
+_A deep investigation into when pgvector abandons HNSW indexes, the query planner behavior that breaks filtered search at production scale, and the workarounds that actually work._
 
 ## Introduction
 
@@ -30,59 +30,9 @@ This article walks through the full technical investigation that uncovered the r
 
 I ran this investigation on a self-hosted PostgreSQL cluster on Azure Kubernetes Service (AKS), managed by the **CloudNativePG (CNPG) operator**. The architecture uses two separate AKS clusters: one dedicated to hosting the PostgreSQL database, and another dedicated to running the benchmark workloads. Both clusters are deployed in the **same Azure region (`northeurope`)** to rule out geographic latency as a variable in the benchmark results. In a production system, your client application would typically run on the same AKS cluster as the CloudNativePG-managed PostgreSQL instance, communicating over the cluster-internal network. Here, the separation into two clusters is intentional: it isolates benchmark workload resource consumption from the database, ensuring that CPU and memory measurements on the database node reflect only PostgreSQL's behavior.
 
-```mermaid
-graph TB
-    LOCAL["Local Machine<br/>(kubectl + helm)"]
-
-    subgraph "Azure Region: North Europe"
-        direction TB
-
-        subgraph "Azure Container Registry"
-            IMG1["postgresql-pgvector:18.1<br/>(Custom PG + pgvector image)"]
-            IMG2["benchmark-engine:v5.2.6<br/>(Python benchmark scripts)"]
-        end
-
-        subgraph "Azure Blob Storage"
-            BLOB["Storage Container<br/>Vector dataset (Parquet)<br/>Query dataset (QA pairs)"]
-        end
-
-        subgraph "CNPG AKS Cluster (aks-cnpg-pgvector)"
-            direction TB
-            subgraph "cnpg-system namespace"
-                OP[CNPG Operator]
-            end
-            subgraph "cnpg-pgvector namespace"
-                PG["PostgreSQL 18.1 + pgvector 0.8.1<br/>8 vCPU request / 16 vCPU limit<br/>32 GB / 64 GB RAM<br/>100 GB Premium SSD"]
-                LB[Azure Load Balancer :5432]
-            end
-            subgraph "monitoring namespace"
-                PROM[Prometheus + Grafana]
-            end
-            OP -->|manages| PG
-            PG --> LB
-            PG -.->|metrics :9187| PROM
-        end
-
-        subgraph "Benchmark Execution AKS Cluster"
-            BJ["Benchmark Jobs<br/>(Insert / Index / Retrieval)"]
-        end
-
-        BJ -->|TCP/5432| LB
-        BLOB -->|mount via PVC| BJ
-        IMG1 -.->|pulls image| PG
-        IMG2 -.->|pulls image| BJ
-
-        subgraph "Azure Managed PostgreSQL"
-            RDB[(benchmark_results DB)]
-        end
-
-        BJ -->|stores results| RDB
-    end
-
-    LOCAL -->|helm install| BJ
-    LOCAL -.->|docker push| IMG1
-    LOCAL -.->|docker push| IMG2
-```
+<p align="center">
+  <img src="doc/architecture.png" alt="Infrastructure Architecture" />
+</p>
 
 The architecture has four layers. At the infrastructure level, two AKS clusters provide compute isolation: one hosts only the PostgreSQL database (managed by the CloudNativePG operator), while the other runs benchmark workloads as Kubernetes Jobs. Azure Container Registry stores both Docker images — the custom PostgreSQL + pgvector image and the Python benchmark engine — while Azure Blob Storage holds the Parquet datasets, mounted into benchmark pods via PersistentVolumeClaims. Prometheus and Grafana run on the database cluster to capture PostgreSQL-specific metrics (cache hit ratio, sequential vs index scans, lock contention, WAL throughput) during benchmark execution. All benchmark jobs are submitted from a local machine via `helm install`, which creates Kubernetes Jobs on the benchmark cluster. These jobs connect to the PostgreSQL instance over the Azure Load Balancer, execute the insert, index creation, and retrieval benchmarks, and write structured results (QPS, latency percentiles, throughput) to a separate Azure Managed PostgreSQL instance for post-execution analysis and visualization.
 
