@@ -13,14 +13,14 @@ But when moving from prototyping to production-grade workloads and scaling pgvec
 1. **Filtered search cliff**: Queries went from **83 milliseconds** to over **215 seconds**, a **2,500x degradation**, triggered by nothing more than changing the `LIMIT` clause (for example, requesting 50 nearest neighbors instead of 10). This catastrophic fall-off does not happen in pure vector search; it only occurs when combining vector search with **metadata filtering**. The root cause is a flaw in the query planner's cost calculation. Up to a certain number of requested nearest neighbors, it efficiently uses the HNSW vector index. But at a specific `LIMIT` threshold - which depends completely on what percentage of your dataset matches the filter condition - the planner miscalculates the cost of post-filtering versus pre-filtering. Once you cross this hidden threshold, it suddenly abandons the HNSW index in favor of a B-tree metadata index scan, forcing a massive brute-force vector distance calculation on every single matching row.
 2. **Hybrid search bottleneck**: Even at low `top_k`, hybrid search (vector + full-text via RRF) is consistently **3 to 4x slower** than pure vector search, with the full-text search component consuming over 90% of query time. This happens because PostgreSQL's GIN index for full-text search operates on a "fetch all, score all, sort all" pattern. While it can efficiently find all rows containing a keyword, it cannot inherently rank them by relevance (`ts_rank()`). To return even the top 10 results, the database must fetch every matching row from disk, re-tokenize the text to compute the rank, and sort the entire matching set, which creates large overhead compared to a graph-based vector index.
 
-This article walks through the full technical investigation that uncovered the root cause of both problems, with `EXPLAIN ANALYZE` evidence at every step. Here is what you will get from it:
+This article walks through the full technical investigation that uncovered the root cause of both problems, with `EXPLAIN ANALYZE` evidence at every step. It also dives into possible workarounds and provides guidance to evaluate whether your dataset and query patterns in production are likely to hit these issues. Here is what you will get from it:
 
-- **Production-grade cloud-native infrastructure**: A complete blueprint for deploying PostgreSQL with pgvector on a self-hosted AKS cluster using the CloudNativePG operator — a real-world reference architecture, not a local-machine prototype.
+- **Production-grade cloud-native infrastructure**: A complete blueprint for deploying PostgreSQL with pgvector on a self-hosted AKS cluster using the CloudNativePG operator, a real-world reference architecture, not a local-machine prototype.
 - **Python async client patterns**: How to use `asyncpg` for high-concurrency vector retrieval, index creation, and bulk data ingestion via PostgreSQL's binary `COPY` protocol.
-- **Full observability stack**: Prometheus and Grafana setup with custom PostgreSQL metrics dashboards, so you can see exactly how CPU, memory, I/O, and query performance behave under load — the same monitoring that captured the real-time evidence of the performance cliff in this investigation.
+- **Full observability stack**: Prometheus and Grafana setup with custom PostgreSQL metrics dashboards, so you can see exactly how CPU, memory, I/O, and query performance behave under load, the same monitoring that captured the real-time evidence of the performance cliff in this investigation.
 - **Quantitative evidence at scale**: Every claim is backed by data from 2.5 million vectors at 1,536 dimensions, with systematic sweeps across concurrency levels and `top_k` values. Prometheus metrics and `EXPLAIN ANALYZE` output demonstrate precisely where and why the failure occurs.
 - **Seven workaround strategies, tested and documented**: Each approach is evaluated with results, so you do not have to discover through trial and error which ones actually work and which ones the query planner silently ignores.
-- **Dataset-agnostic benchmarking framework**: If you want to evaluate whether your own dataset and query patterns will hit this limitation, you can point the included framework at your own vectors and filters to find your specific tipping points — the exact `top_k` threshold where the planner abandons the HNSW index for your data distribution — before it surprises you in production.
+- **Dataset-agnostic benchmarking framework**: If you want to evaluate whether your own dataset and query patterns will hit this limitation, you can point the included framework at your own vectors and filters to find your specific tipping points, the exact `top_k` threshold where the planner abandons the HNSW index for your data distribution, before it surprises you in production.
 
 ---
 
@@ -34,7 +34,7 @@ I ran this investigation on a self-hosted PostgreSQL cluster on Azure Kubernetes
   <img src="doc/architecture.png" alt="Infrastructure Architecture" />
 </p>
 
-The architecture has four layers. At the infrastructure level, two AKS clusters provide compute isolation: one hosts only the PostgreSQL database (managed by the CloudNativePG operator), while the other runs benchmark workloads as Kubernetes Jobs. Azure Container Registry stores both Docker images — the custom PostgreSQL + pgvector image and the Python benchmark engine — while Azure Blob Storage holds the Parquet datasets, mounted into benchmark pods via PersistentVolumeClaims. Prometheus and Grafana run on the database cluster to capture PostgreSQL-specific metrics (cache hit ratio, sequential vs index scans, lock contention, WAL throughput) during benchmark execution. All benchmark jobs are submitted from a local machine via `helm install`, which creates Kubernetes Jobs on the benchmark cluster. These jobs connect to the PostgreSQL instance over the Azure Load Balancer, execute the insert, index creation, and retrieval benchmarks, and write structured results (QPS, latency percentiles, throughput) to a separate Azure Managed PostgreSQL instance for post-execution analysis and visualization.
+The architecture has four layers. At the infrastructure level, two AKS clusters provide compute isolation: one hosts only the PostgreSQL database (managed by the CloudNativePG operator), while the other runs benchmark workloads as Kubernetes Jobs. Azure Container Registry stores both Docker images (the custom PostgreSQL + pgvector image and the Python benchmark engine) while Azure Blob Storage holds the Parquet datasets, mounted into benchmark pods via PersistentVolumeClaims. Prometheus and Grafana run on the database cluster to capture PostgreSQL-specific metrics (cache hit ratio, sequential vs index scans, lock contention, WAL throughput) during benchmark execution. All benchmark jobs are submitted from a local machine via `helm install`, which creates Kubernetes Jobs on the benchmark cluster. These jobs connect to the PostgreSQL instance over the Azure Load Balancer, execute the insert, index creation, and retrieval benchmarks, and write structured results (QPS, latency percentiles, throughput) to a separate Azure Managed PostgreSQL instance for post-execution analysis and visualization.
 
 **CNPG AKS Cluster (`aks-cnpg-pgvector`):**
 
@@ -56,8 +56,8 @@ The architecture has four layers. At the infrastructure level, two AKS clusters 
 
 **Azure Container Registry (ACR):**
 
-- `postgresql-pgvector:18.1` — Custom PostgreSQL 18.1 image with pgvector 0.8.1 built on the CNPG base image
-- `benchmark-engine:v5.2.6` — Python benchmark suite packaged with `uv` for dependency management
+- `postgresql-pgvector:18.1`: Custom PostgreSQL 18.1 image with pgvector 0.8.1 built on the CNPG base image
+- `benchmark-engine:v5.2.6`: Python benchmark suite packaged with `uv` for dependency management
 
 **Azure Blob Storage:**
 
@@ -67,34 +67,34 @@ The architecture has four layers. At the infrastructure level, two AKS clusters 
 
 The full infrastructure setup is documented in dedicated guides within the `doc/` directory. If you want to replicate this environment from scratch, follow these guides in order:
 
-1.  **[CNPG_PGVECTOR_SETUP.md](doc/CNPG_PGVECTOR_SETUP.md)** — Creating the dedicated AKS cluster, installing the CloudNativePG operator, building the custom PostgreSQL + pgvector Docker image, deploying the PostgreSQL cluster via CRD (with tuned parameters for vector workloads), exposing PostgreSQL via LoadBalancer, and verifying the pgvector extension.
-2.  **[CNPG_MONITORING_SETUP.md](doc/CNPG_MONITORING_SETUP.md)** — Deploying the Prometheus + Grafana observability stack, configuring CNPG PodMonitors and custom PostgreSQL metrics queries (cache hit ratio, sequential vs index scans, lock contention, WAL stats), importing the Grafana dashboard, and a comprehensive metrics interpretation guide for every dashboard panel.
-3.  **[execution-guide.md](doc/execution-guide.md)** — Provisioning the benchmark execution AKS cluster, creating Azure Container Registry and image pull secrets, setting up Azure Files storage with PersistentVolumeClaims for dataset mounting, creating Kubernetes secrets for PostgreSQL connectivity (both the CNPG target and the results database), building and pushing the benchmark engine Docker image, running insert / index / retrieval benchmarks as Helm-deployed Kubernetes Jobs, and querying the results database.
+1.  **[CNPG_PGVECTOR_SETUP.md](doc/CNPG_PGVECTOR_SETUP.md)**: Creating the dedicated AKS cluster, installing the CloudNativePG operator, building the custom PostgreSQL + pgvector Docker image, deploying the PostgreSQL cluster via CRD (with tuned parameters for vector workloads), exposing PostgreSQL via LoadBalancer, and verifying the pgvector extension.
+2.  **[CNPG_MONITORING_SETUP.md](doc/CNPG_MONITORING_SETUP.md)**: Deploying the Prometheus + Grafana observability stack, configuring CNPG PodMonitors and custom PostgreSQL metrics queries (cache hit ratio, sequential vs index scans, lock contention, WAL stats), importing the Grafana dashboard, and a comprehensive metrics interpretation guide for every dashboard panel.
+3.  **[execution-guide.md](doc/execution-guide.md)**: Provisioning the benchmark execution AKS cluster, creating Azure Container Registry and image pull secrets, setting up Azure Files storage with PersistentVolumeClaims for dataset mounting, creating Kubernetes secrets for PostgreSQL connectivity (both the CNPG target and the results database), building and pushing the benchmark engine Docker image, running insert / index / retrieval benchmarks as Helm-deployed Kubernetes Jobs, and querying the results database.
 
 Each guide is self-contained with exact commands, expected outputs, and troubleshooting steps.
 
 **Key infrastructure files referenced by these guides:**
 
-- [**Dockerfile**](infrastructure/cnpg-pgvector/Dockerfile) (`infrastructure/cnpg-pgvector/`) — Custom PostgreSQL 18.1 + pgvector 0.8.1 image built on the CNPG base
+- [**Dockerfile**](infrastructure/cnpg-pgvector/Dockerfile) (`infrastructure/cnpg-pgvector/`): Custom PostgreSQL 18.1 + pgvector 0.8.1 image built on the CNPG base
 - [**cluster.yaml**](infrastructure/cnpg-pgvector/cluster.yaml) (`infrastructure/cnpg-pgvector/`) — CNPG Cluster CRD with tuned PostgreSQL parameters for vector workloads
-- [**values-prometheus-grafana.yaml**](infrastructure/cnpg-pgvector/monitoring/values-prometheus-grafana.yaml) (`infrastructure/cnpg-pgvector/monitoring/`) — Helm values for the `kube-prometheus-stack` deployment for the cnpg-pgvector cluster observability
-- [**cnpg-extra-monitoring.yaml**](infrastructure/cnpg-pgvector/monitoring/cnpg-extra-monitoring.yaml) (`infrastructure/cnpg-pgvector/monitoring/`) — Custom SQL queries exposed as CNPG Prometheus metrics (cache hit ratio, connection states, lock contention, scan types)
-- [**cnpg-podmonitor.yaml**](infrastructure/cnpg-pgvector/monitoring/cnpg-podmonitor.yaml) (`infrastructure/cnpg-pgvector/monitoring/`) — PodMonitor telling Prometheus to scrape CNPG metrics on port 9187
-- [**cnpg-pgvector-overview.json**](infrastructure/cnpg-pgvector/monitoring/dashboards/cnpg-pgvector-overview.json) (`infrastructure/cnpg-pgvector/monitoring/dashboards/`) — Grafana dashboard JSON with 10 panel rows covering cluster health, node resources, query performance, connections, buffer cache, checkpoints, WAL, table sizes, and I/O
-- [**Dockerfile**](infrastructure/docker/Dockerfile) (`infrastructure/docker/`) — Benchmark engine Docker image built with `uv` for dependency management
+- [**values-prometheus-grafana.yaml**](infrastructure/cnpg-pgvector/monitoring/values-prometheus-grafana.yaml) (`infrastructure/cnpg-pgvector/monitoring/`): Helm values for the `kube-prometheus-stack` deployment for the cnpg-pgvector cluster observability
+- [**cnpg-extra-monitoring.yaml**](infrastructure/cnpg-pgvector/monitoring/cnpg-extra-monitoring.yaml) (`infrastructure/cnpg-pgvector/monitoring/`): Custom SQL queries exposed as CNPG Prometheus metrics (cache hit ratio, connection states, lock contention, scan types)
+- [**cnpg-podmonitor.yaml**](infrastructure/cnpg-pgvector/monitoring/cnpg-podmonitor.yaml) (`infrastructure/cnpg-pgvector/monitoring/`): PodMonitor telling Prometheus to scrape CNPG metrics on port 9187
+- [**cnpg-pgvector-overview.json**](infrastructure/cnpg-pgvector/monitoring/dashboards/cnpg-pgvector-overview.json) (`infrastructure/cnpg-pgvector/monitoring/dashboards/`): Grafana dashboard JSON with 10 panel rows covering cluster health, node resources, query performance, connections, buffer cache, checkpoints, WAL, table sizes, and I/O
+- [**Dockerfile**](infrastructure/docker/Dockerfile) (`infrastructure/docker/`): Benchmark engine Docker image built with `uv` for dependency management
 
 ---
 
 ## The Dataset
 
-The _Wheel of Time_ (WoT) is a high fantasy book series by Robert Jordan and Brandon Sanderson, spanning **14 novels plus a prequel** — over 4.4 million words in total. I regularly use this corpus for my RAG, vector database, and generative AI experiments because of its scale and richly interconnected world-building: it produces a large number of semantically dense text chunks with natural metadata partitioning (by book, by chapter) and a wide variety of searchable concepts — characters, locations, events, and magic system terminology.
+The _Wheel of Time_ (WoT) is a high fantasy book series by Robert Jordan and Brandon Sanderson, spanning **14 novels plus a prequel**, over 4.4 million words in total. I regularly use this corpus for my RAG, vector database, and generative AI experiments because of its scale and richly interconnected world-building: it produces a large number of semantically dense text chunks with natural metadata partitioning (by book, by chapter) and a wide variety of searchable concepts: characters, locations, events, and magic system terminology.
 
 The base dataset contains **100,105 real text chunk embeddings** generated using OpenAI's `text-embedding-ada-002` model (1,536 dimensions). To test pgvector at production scale, I synthetically expanded this to **2.5 million vectors** by duplicating text chunks with varied metadata combinations and generating synthetic embeddings, preserving the original data distribution characteristics while reaching a dataset size that stresses PostgreSQL's query planner and buffer cache.
 
 The benchmark uses two Parquet datasets stored in Azure Blob Storage:
 
 - **Vector dataset** (2.5 million rows): Each row contains the text chunk (`text`), its 1,536-dimensional embedding (`embedding`), and metadata fields (`book_name`, `chapter_number`, `chapter_title`). On insert, each row maps to a PostgreSQL table with `content text`, `metadata jsonb`, and `embedding vector(1536)` columns.
-- **Query dataset** (4,373 rows): Real questions about the Wheel of Time, each containing a `query_embedding`, extracted `keywords` for hybrid search, and a `filter_field`/`filter_value` pair for filtered search. Every query row is used across all three benchmark search patterns — vector, filtered, and hybrid — without any modification.
+- **Query dataset** (4,373 rows): Real questions about the Wheel of Time, each containing a `query_embedding`, extracted `keywords` for hybrid search, and a `filter_field`/`filter_value` pair for filtered search. Every query row is used across all three benchmark search patterns (vector, filtered, and hybrid) without any modification.
 
 The `metadata->>'book_name'` field has **16 distinct values** (one per book), with the smallest book containing 63,945 rows (2.6%) and the largest containing 209,226 rows (8.4%). This uneven distribution tests the query planner's behavior across different filter selectivities.
 
@@ -104,13 +104,13 @@ The benchmark framework is **dataset-agnostic**: you can point it at your own Pa
 
 ## The Benchmark
 
-Before running retrieval benchmarks, the data must be ingested and indexed. Data ingestion uses PostgreSQL's `COPY` command with binary format via `psycopg3`, which achieves 10 to 50x faster throughput than standard `INSERT` statements — the full 2.5 million row insert completed in approximately 27 minutes. Three indexes are then created on the table: an **HNSW index** on the embedding column for approximate nearest neighbor search (`m = 16`, `ef_construction = 64`), a **B-tree expression index** on `metadata->>'book_name'` for filtered search, and a **GIN index** on `to_tsvector('english', content)` for full-text search. The HNSW index build on 2.5 million 1,536-dimensional vectors took approximately 4 hours and 45 minutes.
+Before running retrieval benchmarks, the data must be ingested and indexed. Data ingestion uses PostgreSQL's `COPY` command with binary format via `psycopg3`, which achieves 10 to 50x faster throughput than standard `INSERT` statements; the full 2.5 million row insert completed in approximately 27 minutes. Three indexes are then created on the table: an **HNSW index** on the embedding column for approximate nearest neighbor search (`m = 16`, `ef_construction = 64`), a **B-tree expression index** on `metadata->>'book_name'` for filtered search, and a **GIN index** on `to_tsvector('english', content)` for full-text search. The HNSW index build on 2.5 million 1,536-dimensional vectors took approximately 4 hours and 45 minutes.
 
 **Benchmark scripts** (`src/pgvector/`):
 
-- [**01_insert_benchmark_copy.py**](src/pgvector/01_insert_benchmark_copy.py) — Bulk data ingestion using PostgreSQL's binary `COPY` protocol via psycopg3. Sets up the database table (`CREATE TABLE` with `content text`, `metadata jsonb`, `embedding vector(1536)`), loads Parquet data in configurable chunks, and streams rows to PostgreSQL. This is the recommended insert method for large datasets.
-- [**01_insert_benchmark.py**](src/pgvector/01_insert_benchmark.py) — Standard row-by-row `INSERT` benchmark for cross-database comparison (matches the insert pattern used with Milvus and MongoDB benchmarks).
-- [**02_create_indexes.py**](src/pgvector/02_create_indexes.py) — Creates HNSW, B-tree, and GIN indexes with configurable parameters. Measures and logs index build times to the results database for each index type.
+- [**01_insert_benchmark_copy.py**](src/pgvector/01_insert_benchmark_copy.py): Bulk data ingestion using PostgreSQL's binary `COPY` protocol via psycopg3. Sets up the database table (`CREATE TABLE` with `content text`, `metadata jsonb`, `embedding vector(1536)`), loads Parquet data in configurable chunks, and streams rows to PostgreSQL. This is the recommended insert method for large datasets.
+- [**01_insert_benchmark.py**](src/pgvector/01_insert_benchmark.py): Standard row-by-row `INSERT` benchmark for cross-database comparison (matches the insert pattern used with Milvus and MongoDB benchmarks).
+- [**02_create_indexes.py**](src/pgvector/02_create_indexes.py): Creates HNSW, B-tree, and GIN indexes with configurable parameters. Measures and logs index build times to the results database for each index type.
 - [**03_retrieval_asyncpg.py**](src/pgvector/03_retrieval_asyncpg.py) — Primary retrieval benchmark using the asyncpg driver. Runs all three search patterns (vector, filtered, hybrid) across configurable concurrency levels and `top_k` values, measuring QPS and latency percentiles (p50, p95, p99). Uses connection pooling with `asyncpg.create_pool()`.
 - [**03_retrieval_psycopg3_async.py**](src/pgvector/03_retrieval_psycopg3_async.py) — Retrieval benchmark using psycopg3's async interface, for driver comparison against asyncpg.
 - [**03_retrieval_psycopg3_sync.py**](src/pgvector/03_retrieval_psycopg3_sync.py) — Synchronous retrieval benchmark using psycopg3, for baseline comparison without async overhead.
@@ -234,7 +234,14 @@ Before diving into the benchmark results and the performance cliff, it is import
 
 ### HNSW Index
 
-HNSW (Hierarchical Navigable Small World) is the primary index type for approximate nearest neighbor (ANN) search in pgvector. It organizes vectors into a multi-layer graph where each layer is a progressively sparser subset of the full dataset. The top layers contain few nodes with long-range connections for fast coarse navigation, while the bottom layer contains every vector with dense short-range connections for precise local search. At each layer, the search algorithm greedily moves to whichever neighbor is closest to the query vector before descending to the next layer for finer resolution.
+HNSW (Hierarchical Navigable Small World) is a graph-based approximate nearest neighbor (ANN) index. pgvector implements it as a PostgreSQL access method, allowing `ORDER BY embedding <=> $1 LIMIT k` queries to be answered by traversing a prebuilt graph instead of scanning every row in the table.
+
+The core idea is a multi-layer graph that works a lot like zooming in on a map. Each vector in your table becomes a "node" in this graph, connected to its nearest neighbors by edges. 
+- **The top layer** contains only a tiny, random subset of nodes (like major cities on a map) connected by long "highways". This allows the search to quickly jump across the vector space.
+- **The middle layers** contain progressively more nodes.
+- **The bottom layer (Layer 0)** contains absolutely every vector in the table, connected by short, dense local roads.
+
+This layered structure enables a fast "coarse-to-fine" search:
 
 ```mermaid
 graph TD
@@ -281,22 +288,30 @@ graph TD
     B0 -.->|"5. Fine-grained search"| C0
 ```
 
-**How search works:**
+**How the search algorithm navigates this graph:**
 
-1. The query vector enters at the topmost layer, which contains only a small subset of nodes with long-range connections
-2. At each layer, the algorithm performs a **greedy search** — it examines the current node's neighbors, moves to whichever neighbor is closest to the query vector, and repeats until it can't get any closer
-3. Once the closest node at the current layer is found, it **descends** to the same node at the next layer down, where more neighbors and finer-grained connections exist
-4. At the bottom layer (Layer 0), which contains **all** nodes, it performs a thorough local search using the `ef_search` parameter to control search breadth
+1. **Enter the top layer**: The search starts at a single, predefined entry node in the topmost layer. It does not scan all nodes in this layer.
+2. **Greedy search**: At the current node, the algorithm calculates the distance between the query vector and all of the node's connected neighbors. If one of those neighbors is closer to the query than the current node is, the algorithm jumps to that neighbor. It repeats this "greedy" hopping process until it reaches a node where *none* of the connected neighbors are closer to the query.
+3. **Descend**: Once it can't get any closer at the current layer, it drops down to the **exact same node** in the layer below. Because the layer below has more nodes and connections, the node it just dropped into now has new, finer-grained neighbors to explore. It resumes the greedy search from there.
+4. **Bottom layer search**: By the time it descends to Layer 0 (which contains all data), it is already in the correct "neighborhood". It explores this local area thoroughly, keeping a list of the best `k` candidates it finds.
+
+The total number of distance comparisons is logarithmic in the dataset size, which is what makes HNSW dramatically faster than a sequential scan.
 
 **Key parameters:**
 
-- **`m`** (build-time, default: 16) — Maximum number of connections per node per layer. Higher values create a denser graph with more connections, improving recall but increasing index size and build time. Our benchmark uses `m = 16`.
+- **`m`** (build-time, default: 16) — The maximum number of edges (connections) a single node can have to other nodes in a layer. It dictates how many neighbors the algorithm checks during the greedy search step. Our benchmark uses `m = 16`.
 - **`ef_construction`** (build-time, default: 64) — Size of the dynamic candidate list during index construction. Higher values produce a higher-quality graph but take longer to build. Our benchmark uses `ef_construction = 64`.
-- **`ef_search`** (query-time, default: 40) — Size of the dynamic candidate list during search. This directly controls the recall vs. speed tradeoff: higher values explore more candidates, giving better recall at the cost of higher latency. Can be set per-session with `SET hnsw.ef_search = 100`.
+- **`ef_search`** (query-time, default: 40) — Size of the candidate priority queue during the Layer 0 search. This directly controls the recall vs. speed tradeoff: higher values explore more candidates before stopping, giving better recall at the cost of higher latency. Can be set per-session with `SET hnsw.ef_search = 100`.
 
 **The critical detail for filtered search:**
 
-When PostgreSQL uses the HNSW index for a query with a `WHERE` clause (e.g., `WHERE metadata->>'book_name' = 'The Eye of the World'`), the filter is applied as a **post-filter** — the index traversal finds the nearest vectors first, and then non-matching rows are **discarded** after retrieval. If only 2.6% of the table matches the filter (the smallest book), the index must visit roughly **38x more candidates** than `top_k` just to find enough matching rows. This is the root cause of the performance cliff: at higher `top_k` values, the post-filtering overhead becomes so severe that PostgreSQL's query planner decides to abandon the HNSW index entirely and switch to a sequential scan with bitmap filtering — which is dramatically slower for vector operations.
+When PostgreSQL uses the HNSW index for a query with a `WHERE` clause (e.g., `WHERE metadata->>'book_name' = 'The Eye of the World'`), it does not pre-filter the graph. Instead, the index traversal finds the nearest vectors first, and applies the filter as a **post-filter**, discarding rows that do not match. If a candidate is discarded, the search is forced to keep exploring further outward into the graph to find replacement results.
+
+To understand why this breaks down, look at the math: if only **2.6%** of your table matches the filter (the smallest book in our dataset), that means for every 100 nearest neighbors the index finds, 97.4 of them are the wrong book and get thrown away. 
+
+To find `top_k` valid matches, the index must traverse and retrieve `1 / 0.026 = 38.4` times as many nodes. If you ask for `LIMIT 50`, the index has to fetch and evaluate roughly **1,920 nearest neighbors** just to find 50 that belong to the correct book.
+
+This post-filter behavior is the root of the performance problem investigated in this article. When the filter is selective enough that most candidates are discarded, the index must explore far more of the graph than it would for an unfiltered query. At a certain threshold, PostgreSQL's query planner looks at this required effort, decides the index path is too expensive, abandons the HNSW index entirely, and switches to a sequential scan with bitmap filtering — which is dramatically slower for vector operations.
 
 ### B-Tree Index
 
@@ -304,24 +319,28 @@ A B-tree (balanced tree) is PostgreSQL's default index type. The expression inde
 
 ### Bitmap Heap Scan
 
-A Bitmap Heap Scan is a two-phase access method:
+To understand a Bitmap Heap Scan, we first need to understand how PostgreSQL stores data. A PostgreSQL table (often called the "heap") is physically divided into chunks of storage called "pages" (typically 8 KB each). 
+
+When a query needs to fetch thousands of rows, reading them one-by-one using a standard index scan is inefficient because it causes random disk access—the database might read page 10, then page 500, and then page 10 again. 
+
+A Bitmap Heap Scan solves this by breaking the retrieval into a two-phase process that optimizes disk access:
 
 ```mermaid
 flowchart LR
     subgraph "Phase 1: Bitmap Index Scan"
-        BT["B-Tree Index<br/>(metadata->>'book_name')"] --> BM["Bitmap<br/>(one bit per page)"]
+        BT["B-Tree Index<br/>(metadata->>'book_name')"] --> BM["In-Memory Bitmap<br/>(1 bit per physical page)"]
     end
     subgraph "Phase 2: Bitmap Heap Scan"
-        BM --> HP["Fetch Heap Pages<br/>(table data)"]
-        HP --> RC["Recheck Condition<br/>on each row"]
+        BM --> HP["Fetch Physical Pages<br/>(in sequential order)"]
+        HP --> RC["Filter Exact Rows<br/>(Recheck Condition)"]
     end
     RC --> OUT["63,945 matching rows"]
 ```
 
-1. **Bitmap Index Scan**: Reads the B-tree index to build a bitmap, a bitset where each bit represents a table page (8 KB block). If any row on that page matches the condition, the bit is set.
-2. **Bitmap Heap Scan**: Reads the table pages corresponding to set bits, rechecking each row against the condition.
+1. **Bitmap Index Scan (Building the map)**: PostgreSQL scans the B-Tree index to find all rows that match the filter. Instead of fetching the data immediately, it builds an in-memory "bitmap"—a simple array of 1s and 0s where each bit corresponds to a physical page in the table. If a page contains at least one matching row, its bit is set to 1.
+2. **Bitmap Heap Scan (Fetching the data)**: PostgreSQL reads the bitmap and fetches only the flagged pages from the disk. Because it knows exactly which pages it needs, it can fetch them in physical sequential order, drastically reducing disk I/O overhead. Once a page is loaded into memory, it checks the rows inside it to return the exact matches.
 
-This is efficient when many rows match (too many for a simple Index Scan, but not so many that a Sequential Scan would be faster). For "00. New Spring" with 63,945 matching rows spread across 50,137 heap blocks, it is a reasonable choice for the metadata filter alone. The problem is what comes **after** the Bitmap Heap Scan: brute-force distance computation on all 63,945 rows.
+This method is highly efficient when a filter matches a large number of rows (like the 63,945 rows for "00. New Spring", which are spread across 50,137 physical pages). For the metadata filter alone, this is a fast and logical choice. The problem is what the query planner decides to do **after** the Bitmap Heap Scan: a brute-force vector distance computation on all 63,945 retrieved rows.
 
 ### GIN Index and Full-Text Search
 
