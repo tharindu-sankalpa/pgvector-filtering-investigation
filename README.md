@@ -234,7 +234,7 @@ Before diving into the benchmark results and the performance cliff, it is import
 
 ### HNSW Index
 
-HNSW (Hierarchical Navigable Small Worlds) is a graph-based approximate nearest neighbor (ANN) index. pgvector implements it as a PostgreSQL access method. Instead of scanning every row, it traverses a multi-layer graph structure:
+HNSW (Hierarchical Navigable Small World) is the primary index type for approximate nearest neighbor (ANN) search in pgvector. It organizes vectors into a multi-layer graph where each layer is a progressively sparser subset of the full dataset. The top layers contain few nodes with long-range connections for fast coarse navigation, while the bottom layer contains every vector with dense short-range connections for precise local search. At each layer, the search algorithm greedily moves to whichever neighbor is closest to the query vector before descending to the next layer for finer resolution.
 
 ```mermaid
 graph TD
@@ -281,11 +281,22 @@ graph TD
     B0 -.->|"5. Fine-grained search"| C0
 ```
 
-The top layers have fewer, widely-spaced nodes for long-range navigation. The bottom layer contains all nodes for precise local search. Search starts from the top and descends, greedily moving toward the query vector at each layer.
+**How search works:**
 
-The key parameter is `ef_search` (default: 40), which controls how many candidate nodes are explored at the bottom layer. Higher values give better recall but slower search.
+1. The query vector enters at the topmost layer, which contains only a small subset of nodes with long-range connections
+2. At each layer, the algorithm performs a **greedy search** — it examines the current node's neighbors, moves to whichever neighbor is closest to the query vector, and repeats until it can't get any closer
+3. Once the closest node at the current layer is found, it **descends** to the same node at the next layer down, where more neighbors and finer-grained connections exist
+4. At the bottom layer (Layer 0), which contains **all** nodes, it performs a thorough local search using the `ef_search` parameter to control search breadth
 
-When PostgreSQL uses the HNSW index for a filtered query, it traverses the graph, finds candidate rows, and then applies the `WHERE` clause as a **post-filter**, discarding non-matching rows. If a candidate does not match the filter, it is discarded, and the search continues deeper into the graph.
+**Key parameters:**
+
+- **`m`** (build-time, default: 16) — Maximum number of connections per node per layer. Higher values create a denser graph with more connections, improving recall but increasing index size and build time. Our benchmark uses `m = 16`.
+- **`ef_construction`** (build-time, default: 64) — Size of the dynamic candidate list during index construction. Higher values produce a higher-quality graph but take longer to build. Our benchmark uses `ef_construction = 64`.
+- **`ef_search`** (query-time, default: 40) — Size of the dynamic candidate list during search. This directly controls the recall vs. speed tradeoff: higher values explore more candidates, giving better recall at the cost of higher latency. Can be set per-session with `SET hnsw.ef_search = 100`.
+
+**The critical detail for filtered search:**
+
+When PostgreSQL uses the HNSW index for a query with a `WHERE` clause (e.g., `WHERE metadata->>'book_name' = 'The Eye of the World'`), the filter is applied as a **post-filter** — the index traversal finds the nearest vectors first, and then non-matching rows are **discarded** after retrieval. If only 2.6% of the table matches the filter (the smallest book), the index must visit roughly **38x more candidates** than `top_k` just to find enough matching rows. This is the root cause of the performance cliff: at higher `top_k` values, the post-filtering overhead becomes so severe that PostgreSQL's query planner decides to abandon the HNSW index entirely and switch to a sequential scan with bitmap filtering — which is dramatically slower for vector operations.
 
 ### B-Tree Index
 
