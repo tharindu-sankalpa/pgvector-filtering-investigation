@@ -260,19 +260,66 @@ The total number of distance comparisons is logarithmic in the dataset size, whi
 
 **Key parameters:**
 
-- **`m`** (build-time, default: 16) — The maximum number of edges (connections) a single node can have to other nodes in a layer. It dictates how many neighbors the algorithm checks during the greedy search step. Our benchmark uses `m = 16`.
-- **`ef_construction`** (build-time, default: 64) — Controls the quality of the edges built into the graph. When a new vector is inserted, the algorithm must decide which existing nodes to connect it to. It does this by running a search (similar to the greedy traversal described above) to find the best neighbors for the new node. `ef_construction` is the size of the candidate list used during that neighbor search: a larger list means the algorithm evaluates more potential neighbors before selecting the best `m` to create edges to, producing a higher-quality graph where each node is connected to its truly closest neighbors. The tradeoff is build time — a larger candidate list means more distance computations per insertion, so index construction takes longer. Our benchmark uses `ef_construction = 64`.
-- **`ef_search`** (query-time, default: 40) — Controls how thoroughly the algorithm explores the bottom layer (Layer 0) during a query. Recall from step 4 above: once the search descends to Layer 0, it explores the local neighborhood to collect the best candidates. `ef_search` is the size of the priority queue that holds these candidates. As the algorithm hops from node to node in Layer 0, it adds each visited neighbor to this queue, keeping only the closest `ef_search` candidates. A larger queue means the search casts a wider net — it continues exploring outward from the query vector for longer, visiting more nodes before concluding that it has found the best results. This directly controls the recall vs. speed tradeoff: `ef_search = 40` (the default) terminates quickly but may miss true nearest neighbors in dense regions, while `ef_search = 400` explores 10x more of the graph, giving near-perfect recall at higher latency. Must be ≥ `top_k`. Can be set per-session with `SET hnsw.ef_search = 100`.
+- **`m`** (build-time, default: 16) — The maximum number of edges (connections) a single node can have to other nodes in a layer. At search time, each greedy hop evaluates exactly `m` neighbors to decide where to move next, so this parameter directly shapes both graph quality and search cost.
+  - **Quality (recall):** Higher `m` means each node is connected to more neighbors, making the graph more densely interconnected. This reduces the chance of "dead ends" where the greedy search gets stuck in a local minimum — with more edges, there are more paths to the true nearest neighbors. Increasing `m` from 16 to 48 can noticeably improve recall, especially for high-dimensional data (like our 1,536-dim vectors) where the graph needs richer connectivity to capture the geometry of the space.
+  - **Performance:** Higher `m` increases both build time and search latency. During construction, the algorithm must evaluate and maintain more connections per node. During search, every hop computes distances to all `m` neighbors, so doubling `m` roughly doubles the per-hop cost. Memory usage also scales linearly with `m`, since each node stores `m` edge pointers per layer.
+  - Our benchmark uses `m = 16` (the pgvector default), which provides a practical balance for most workloads.
+
+- **`ef_construction`** (build-time, default: 64) — Controls the quality of the edges built into the graph. When a new vector is inserted, the algorithm must decide which existing nodes to connect it to. It does this by running a search (similar to the greedy traversal described above) to find the best neighbors for the new node. `ef_construction` is the size of the candidate list used during that neighbor search: a larger list means the algorithm evaluates more potential neighbors before selecting the best `m` to create edges to.
+  - **Quality (recall):** This is the single most impactful parameter for index quality. A larger `ef_construction` means the build-time search explores more of the graph when deciding who to connect a new node to, so each node ends up linked to its *truly* closest neighbors rather than merely the first `m` close-enough nodes found. The result is a higher-quality graph where search paths converge more reliably to the correct answer. Increasing `ef_construction` from 64 to 256 can significantly improve recall, especially for large datasets where the greedy build-time search is more likely to miss optimal connections with a small candidate list.
+  - **Performance:** Higher `ef_construction` increases index build time proportionally (more distance computations per insertion) but has **zero effect on search latency** — it is purely a build-time parameter. Once the index is built, the graph structure is fixed and search speed depends only on `m` and `ef_search`. This makes `ef_construction` a "free quality knob" — you pay the cost once during index creation and benefit from better recall on every subsequent query.
+  - Our benchmark uses `ef_construction = 64` (the pgvector default). For production systems where index build time is acceptable (our 2.5M-vector build took ~4h 45m), values of 128–256 are common.
+
+- **`ef_search`** (query-time, default: 40) — Controls how thoroughly the algorithm explores the bottom layer (Layer 0) during a query. Recall from step 4 above: once the search descends to Layer 0, it explores the local neighborhood to collect the best candidates. `ef_search` is the size of the priority queue that holds these candidates. As the algorithm hops from node to node in Layer 0, it adds each visited neighbor to this queue, keeping only the closest `ef_search` candidates.
+  - **Quality (recall):** This is the primary runtime knob for recall. A larger queue means the search casts a wider net — it continues exploring outward from the query vector for longer, visiting more nodes before concluding that it has found the best results. `ef_search = 40` (the default) terminates quickly but may miss true nearest neighbors in dense regions of the vector space. `ef_search = 400` explores roughly 10x more of the graph, giving near-perfect recall. For most production workloads, values between 100–200 provide a strong recall/speed balance.
+  - **Performance:** Search latency scales roughly linearly with `ef_search`, since each additional candidate in the queue requires distance computations against its neighbors. Doubling `ef_search` approximately doubles the number of nodes visited and distance computations performed, which directly increases query time. At high concurrency, this cost compounds — each concurrent query does more work, increasing CPU load and reducing overall QPS.
+  - Must be ≥ `top_k` (you cannot return more results than the queue can hold). Can be tuned per-session without rebuilding the index: `SET hnsw.ef_search = 100`.
 
 **The critical detail for filtered search:**
 
 When PostgreSQL uses the HNSW index for a query with a `WHERE` clause (e.g., `WHERE metadata->>'book_name' = 'The Eye of the World'`), it does not pre-filter the graph. Instead, the index traversal finds the nearest vectors first, and applies the filter as a **post-filter**, discarding rows that do not match. If a candidate is discarded, the search is forced to keep exploring further outward into the graph to find replacement results.
 
-To understand why this breaks down, look at the math: if only **2.6%** of your table matches the filter (the smallest book in our dataset), that means for every 100 nearest neighbors the index finds, 97.4 of them are the wrong book and get thrown away. 
+To understand why this breaks down, consider a concrete example. The smallest book in our dataset — "00. New Spring" — accounts for 63,945 rows out of 2.5 million, roughly **2.6%** of the table. When you run a filtered query like `WHERE metadata->>'book_name' = '00. New Spring' ORDER BY embedding <=> $1 LIMIT 50`, the HNSW index does not know about the filter. It simply traverses the graph and returns vectors in order of distance from the query vector, regardless of which book they belong to.
 
-To find `top_k` valid matches, the index must traverse and retrieve `1 / 0.026 = 38.4` times as many nodes. If you ask for `LIMIT 50`, the index has to fetch and evaluate roughly **1,920 nearest neighbors** just to find 50 that belong to the correct book.
+Since only 2.6% of all vectors belong to "New Spring", the index must retrieve, on average, about **38 candidates** before it finds a single one that passes the filter ($\frac{1}{0.026} \approx 38.4$). The other 37 are discarded. To accumulate 50 valid results after filtering, the index therefore needs to traverse and evaluate roughly $50 \times 38.4 \approx$ **1,920 candidate vectors** from the graph — scanning through 1,920 nearest neighbors just to find 50 that belong to the correct book.
 
-This post-filter behavior is the root of the performance problem investigated in this article. When the filter is selective enough that most candidates are discarded, the index must explore far more of the graph than it would for an unfiltered query. At a certain threshold, PostgreSQL's query planner looks at this required effort, decides the index path is too expensive, abandons the HNSW index entirely, and switches to a sequential scan with bitmap filtering — which is dramatically slower for vector operations.
+This post-filter behavior creates two compounding problems. The first is an **index-level recall problem**: with the default `ef_search = 40`, the HNSW index performs a single traversal, collects at most 40 candidates, and stops. If a selective filter discards most of them, the index simply cannot produce enough matching rows — asking for `LIMIT 50` with a 2.6% filter match rate would require roughly 1,920 candidates, far beyond the 40 the index provides. The second is a **planner-level cost estimation problem**: PostgreSQL's query planner looks at this required effort, estimates the cost of the HNSW path using a cost model that dramatically underprices vector distance computation, concludes the brute-force bitmap scan path is cheaper, and abandons the HNSW index entirely. This planner decision — not the index's scanning limitation — is the root of the catastrophic performance cliff investigated in this article.
+
+**Iterative index scans (pgvector 0.8.0+):**
+
+pgvector 0.8.0 (released October 2024) introduced **iterative index scans**, a feature that addresses the first problem: the index-level recall limitation. Without iterative scan, the HNSW index performs a single pass: it traverses the graph, collects up to `ef_search` candidates (default 40), and returns them. If a `WHERE` clause filters most of those candidates away, you get fewer results than requested. Iterative scan does **not** address the second problem — the planner's flawed cost model — which is a separate, upstream issue in PostgreSQL's query optimizer.
+
+Iterative scan allows the HNSW index to **resume scanning** when the initial batch of candidates is insufficient. Instead of discarding the traversal state after the first pass, the index preserves a priority queue of "discarded" candidates — nodes that were explored but not yet returned. When PostgreSQL needs more rows (because post-filtering eliminated too many), the index picks up where it left off, expanding outward from those discarded candidates to explore additional regions of the graph. This process repeats in batches of `ef_search` candidates until enough filtered results are found, or until a safety limit is reached (`hnsw.max_scan_tuples`, default 20,000).
+
+This is conceptually similar to pagination through the graph: rather than a single fixed-size scan, iterative mode turns the HNSW index into a streaming source that can produce as many candidates as needed.
+
+Iterative scan has three modes, controlled by the `hnsw.iterative_scan` GUC (Grand Unified Configuration — PostgreSQL's term for a runtime configuration parameter, i.e., a setting you can change with `SET` or in `postgresql.conf`):
+
+- **`off`** (default) — The original behavior. A single HNSW traversal collects up to `ef_search` candidates and stops. If filtering removes most of them, you get fewer results than `LIMIT` requested. This is the mode our benchmark uses.
+- **`strict_order`** — Enables iterative rescanning with the guarantee that results are returned in **exact distance order**. Each resumed batch is merged with previously seen results, and the index only emits a row when it can prove no closer unseen row exists. This provides the same ordering guarantee as a non-iterative scan, but may do more work to maintain that invariant.
+- **`relaxed_order`** — Enables iterative rescanning but allows results to be **slightly out of order** by distance. This is faster than `strict_order` because the index can emit rows from resumed batches without waiting to confirm global ordering. The results are still approximate nearest neighbors, but two adjacent rows might be swapped in distance ranking. For most practical applications (RAG retrieval, recommendation systems), this is indistinguishable from strict ordering. This mode provides the best recall-to-performance ratio for filtered queries.
+
+Usage:
+
+```sql
+-- Enable iterative scan for the session
+SET hnsw.iterative_scan = strict_order;
+-- or
+SET hnsw.iterative_scan = relaxed_order;
+
+-- Control how far the scan can go (default: 20,000 tuples)
+SET hnsw.max_scan_tuples = 20000;
+
+-- Control memory usage as a multiplier of work_mem (default: 1)
+SET hnsw.scan_mem_multiplier = 2;
+```
+
+**To summarize**: Iterative scan gives the HNSW index the mechanical ability to keep scanning until enough filtered results are found. But the planner's cost model — with its underpriced vector distance operator (`cpu_operator_cost = 0.0025` for a 1,536-dimension cosine distance computation) — is evaluated *before* the index is ever consulted. If the planner estimates that the brute-force bitmap scan path is cheaper than the HNSW path, it will choose brute-force regardless of whether iterative scan is enabled. Iterative scan only activates when the planner actually selects the HNSW index — which, as we will see in the workarounds section, is exactly what fails to happen at higher `top_k` values.
+
+To recap the two problems stacked on top of each other:
+
+1. **The index problem** (solved by iterative scan): HNSW could not keep scanning beyond `ef_search` to find enough filtered results.
+2. **The planner problem** (unsolved): PostgreSQL's cost model underprices vector distance computation, causing it to prefer brute-force over HNSW at moderate `top_k` values — before iterative scan ever gets a chance to run.
 
 ### B-Tree Index
 
@@ -577,15 +624,30 @@ The theory: a larger `ef_search` means the HNSW index explores more candidates, 
 
 ### Approach 4: `hnsw.iterative_scan = relaxed_order` (pgvector 0.8.0+)
 
-pgvector 0.8.0 introduced iterative scan, designed specifically for cases where the HNSW index needs to keep searching beyond `ef_search` candidates to satisfy a `LIMIT` after filtering. This is the feature that should fix this problem.
+As explained in the HNSW Index section, pgvector 0.8.0 introduced iterative index scans — the ability for the HNSW index to resume scanning in batches when post-filtering discards too many candidates. In `relaxed_order` mode, the index continues expanding outward through the graph, returning additional batches of `ef_search` candidates from its discarded priority queue, until enough filtered results are accumulated.
 
-**Result**: **The planner still chose Bitmap Heap Scan.** The `hnsw.iterative_scan` setting enables the iterative behavior, but it does not change the planner's cost estimates. If the planner does not choose the HNSW path, iterative scan never activates.
+This is precisely the feature designed to solve the filtered search problem at the index level. With iterative scan enabled, the HNSW index can handle queries like `WHERE book_name = '00. New Spring' LIMIT 50` by iterating through as many graph nodes as needed (up to `hnsw.max_scan_tuples = 20,000`) instead of giving up after the first 40 candidates.
+
+```sql
+SET hnsw.iterative_scan = relaxed_order;
+```
+
+**Result**: **The planner still chose Bitmap Heap Scan.** This is the two-problem distinction in action. Iterative scan fixes the index-level limitation (HNSW can now produce enough filtered results), but it does not change the planner's cost model. The planner still computes the same cost estimate for the HNSW path — using `cpu_operator_cost = 0.0025` for 1,536-dimensional cosine distance — and still concludes that the brute-force bitmap scan path looks cheaper at `top_k >= 42`. Since the planner never selects the HNSW index, iterative scan never gets a chance to activate.
+
+This is the key insight: **iterative scan is the right solution to the wrong problem layer.** The bottleneck is not the index's inability to scan further — it is the planner's inability to accurately price vector distance computation, causing it to reject the HNSW path before the index is even consulted.
 
 ### Approach 5: Iterative Scan + Disable All Other Scans
 
-Combined `hnsw.iterative_scan = relaxed_order` with disabling all other scan types.
+Combined `hnsw.iterative_scan = relaxed_order` with disabling all other scan types, attempting to force the planner's hand:
 
-**Result**: Still no HNSW usage. The planner is remarkably persistent in avoiding the HNSW index for this query pattern at higher `LIMIT` values. Even with `enable_seqscan = off`, `enable_bitmapscan = off`, and `enable_indexscan = off`, the planner still chose the B-tree metadata index with sort (~871 ms), refusing to use the HNSW index for the filtered query.
+```sql
+SET hnsw.iterative_scan = relaxed_order;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SET enable_indexscan = off;
+```
+
+**Result**: Still no HNSW usage. The planner is remarkably persistent in avoiding the HNSW index for this query pattern at higher `LIMIT` values. Even with all alternative scan types disabled, the planner still chose the B-tree metadata index with sort (~871 ms), refusing to use the HNSW index for the filtered query. PostgreSQL treats the `enable_*` settings as strong preferences, not absolute rules — when it believes no viable alternative exists, it will override these hints.
 
 ### Approach 6: CTE Over-Fetch Pattern (The Best Workaround)
 
@@ -772,7 +834,9 @@ This is not a criticism of PostgreSQL. It is a general-purpose relational databa
 
 3. **Use the CTE over-fetch pattern** for filtered search when `top_k` exceeds your tipping point. Calculate the over-fetch multiplier based on your filter selectivity.
 
-4. **Set `enable_bitmapscan = off`** as a safety net if you cannot restructure queries. This will not give you HNSW performance, but it prevents the worst-case scenario.
+4. **Enable iterative scan where the planner cooperates.** If your filter selectivity is high enough (matching a large percentage of rows) or your `top_k` is low enough that the planner still selects the HNSW index, setting `hnsw.iterative_scan = relaxed_order` will allow the index to keep scanning until enough filtered results are found. Iterative scan is the correct long-term solution — the problem in our benchmark is that the planner abandons HNSW before iterative scan gets a chance to help. For queries where the planner does pick HNSW, iterative scan dramatically improves filtered search reliability.
+
+5. **Set `enable_bitmapscan = off`** as a safety net if you cannot restructure queries. This will not give you HNSW performance, but it prevents the worst-case scenario.
 
 5. **Profile your hybrid search queries.** Run `EXPLAIN ANALYZE` on the text CTE in isolation to understand how many rows your keywords match. If common search terms match tens of thousands of rows, expect the text component to dominate query time. Consider a pre-computed `tsvector` column or the `rum` extension.
 
@@ -788,7 +852,7 @@ Consider whether filtered search and hybrid search are core requirements. If you
 
 pgvector is a remarkable extension that brings vector search to PostgreSQL. For many workloads, especially at smaller scale or without complex filtering, it performs admirably. But at 2.5 million vectors, two distinct architectural limitations emerge:
 
-1. **Filtered search**: A fundamental mismatch between PostgreSQL's query planner cost model and the actual cost of vector operations creates a performance cliff that is invisible until you hit it. The planner does exactly what it is supposed to: pick the plan with the lowest estimated cost. The problem is that its cost estimates for vector operations are off by orders of magnitude. The CTE over-fetch pattern remains the most reliable workaround.
+1. **Filtered search**: A fundamental mismatch between PostgreSQL's query planner cost model and the actual cost of vector operations creates a performance cliff that is invisible until you hit it. The planner does exactly what it is supposed to: pick the plan with the lowest estimated cost. The problem is that its cost estimates for vector operations are off by orders of magnitude. pgvector 0.8.0's iterative scan feature solves the index-level limitation — giving HNSW the ability to keep scanning until enough filtered results are found — but the planner-level cost estimation flaw is upstream of the index. When the planner rejects the HNSW path based on its flawed cost model, iterative scan never gets a chance to activate. These are two distinct problems stacked on top of each other, and fixing the index layer alone is not sufficient while the planner layer remains broken. The CTE over-fetch pattern remains the most reliable workaround because it sidesteps the planner entirely.
 
 2. **Hybrid search**: PostgreSQL's GIN index cannot produce relevance-ranked results without fetching and scoring every matching row. For common keywords that match tens of thousands of documents, this "fetch all, score all, sort all" pattern makes the full-text component dominate hybrid query time, regardless of how fast the vector component is.
 
