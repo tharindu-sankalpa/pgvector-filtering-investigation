@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HNSW Index — Search Architecture</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Fraunces:wght@400;700;900&display=swap');
+
+:root {
+  --bg:           #f4f1ea;
+  --surface:      #ffffff;
+  --border:       #ddd8cc;
+
+  --blue:         #1a5fa8;
+  --blue-soft:    #e6eef8;
+  --blue-border:  #b0c8e8;
+  --blue-mid:     #4a8fd4;
+
+  --green:        #1a6e3a;
+  --green-soft:   #e6f4ec;
+  --green-border: #a0d0b0;
+
+  --amber:        #b85a00;
+  --amber-soft:   #fdf0e0;
+  --amber-border: #e8c88a;
+
+  --red:          #c03020;
+  --purple:       #5828b0;
+
+  --ink:          #1a1814;
+  --ink-mid:      #5a5650;
+  --ink-faint:    #9a9590;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  font-family: 'Fraunces', Georgia, serif;
+  display: flex;
+  justify-content: center;
+  padding: 48px 24px 64px;
+}
+
+.page { width: 900px; max-width: 100%; }
+
+/* Header */
+.page-title {
+  font-size: 27px; font-weight: 900; color: var(--ink);
+  letter-spacing: -0.5px; margin-bottom: 4px;
+}
+.page-sub {
+  font-family: 'IBM Plex Mono', monospace; font-size: 11px;
+  color: var(--ink-faint); margin-bottom: 36px; letter-spacing: 0.04em;
+}
+
+/* ── Layer wrapper ── */
+.layer-wrap { border-radius: 14px; overflow: hidden; border: 1.5px solid var(--border); background: var(--surface); margin-bottom: 0; }
+.layer-wrap + .layer-wrap { border-top: none; border-radius: 0; }
+.layer-wrap:first-of-type { border-radius: 14px 14px 0 0; }
+.layer-wrap:last-of-type  { border-radius: 0 0 14px 14px; }
+
+/* Layer header row */
+.layer-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 14px 24px 10px;
+}
+.layer-tag {
+  font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 600;
+  letter-spacing: 0.14em; text-transform: uppercase;
+  padding: 3px 9px; border-radius: 4px;
+}
+.tag-top   { background: var(--blue-soft);  color: var(--blue);  border: 1px solid var(--blue-border); }
+.tag-mid   { background: var(--green-soft); color: var(--green); border: 1px solid var(--green-border); }
+.tag-bot   { background: var(--amber-soft); color: var(--amber); border: 1px solid var(--amber-border); }
+
+.layer-name { font-size: 15px; font-weight: 700; color: var(--ink); }
+.layer-desc { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--ink-faint); margin-left: auto; }
+
+/* Layer body: annotation column left + graph right */
+.layer-body {
+  display: grid;
+  gap: 0;
+  padding: 0 24px 18px;
+}
+.layer-body-top { grid-template-columns: 200px 1fr; }
+.layer-body-mid { grid-template-columns: 200px 1fr; }
+.layer-body-bot { grid-template-columns: 1fr; } /* bot spans full width, annotations below */
+
+/* Annotation column */
+.ann-col {
+  display: flex; flex-direction: column; justify-content: center;
+  gap: 10px; padding-right: 16px; border-right: 1px dashed var(--border);
+}
+.ann-item {
+  display: flex; flex-direction: column; gap: 2px;
+}
+.ann-step {
+  font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 600;
+  letter-spacing: 0.1em; text-transform: uppercase;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.ann-text {
+  font-family: 'IBM Plex Mono', monospace; font-size: 10px;
+  color: var(--ink-mid); line-height: 1.5;
+}
+.badge {
+  display: inline-block; padding: 2px 7px; border-radius: 4px;
+  font-size: 9px; font-weight: 600; font-family: 'IBM Plex Mono', monospace;
+  letter-spacing: 0.08em; text-transform: uppercase;
+}
+.badge-blue   { background: var(--blue);   color: white; }
+.badge-green  { background: var(--green);  color: white; }
+.badge-purple { background: var(--purple); color: white; }
+.badge-amber  { background: var(--amber);  color: white; }
+
+/* Graph column */
+.graph-col { padding-left: 20px; }
+
+svg { display: block; width: 100%; overflow: visible; }
+
+/* Descent connector strip */
+.descent-strip {
+  background: #ede8f8;
+  border-left: 1.5px solid var(--border);
+  border-right: 1.5px solid var(--border);
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  padding: 9px 0;
+}
+.descent-label {
+  font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 600;
+  color: var(--purple); letter-spacing: 0.06em;
+}
+
+/* Bottom layer top-k results row */
+.topk-row {
+  display: flex; align-items: flex-start; gap: 0;
+  padding: 0 24px 20px;
+  flex-wrap: wrap;
+}
+.topk-title {
+  font-family: 'IBM Plex Mono', monospace; font-size: 10px; font-weight: 600;
+  color: var(--amber); letter-spacing: 0.08em; text-transform: uppercase;
+  margin-bottom: 10px;
+}
+
+/* k-result chips */
+.k-results {
+  display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
+}
+.k-chip {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--amber-soft); border: 1.5px solid var(--amber-border);
+  border-radius: 8px; padding: 6px 12px;
+  font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--amber);
+}
+.k-chip.rank1 { background: #fff0ee; border-color: #e07060; color: var(--red); font-weight: 600; }
+.k-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+
+/* Legend */
+.legend {
+  display: flex; flex-wrap: wrap; gap: 14px 24px;
+  padding: 14px 20px;
+  background: var(--surface); border: 1.5px solid var(--border);
+  border-radius: 10px; margin-top: 14px;
+}
+.leg-item {
+  display: flex; align-items: center; gap: 8px;
+  font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--ink-mid);
+}
+
+/* Step cards */
+.steps { display: grid; grid-template-columns: repeat(4,1fr); gap: 10px; margin-top: 14px; }
+.step  { border-radius: 10px; padding: 14px 15px; background: var(--surface); border: 1.5px solid var(--border); }
+.step-n { font-family: 'IBM Plex Mono', monospace; font-size: 9px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 5px; }
+.step-title { font-size: 13px; font-weight: 700; color: var(--ink); margin-bottom: 5px; line-height: 1.3; }
+.step-body  { font-family: 'IBM Plex Mono', monospace; font-size: 10px; color: var(--ink-mid); line-height: 1.6; }
+.s1,.s2 { border-color: var(--blue-border);  } .s1 .step-n,.s2 .step-n { color: var(--blue); }
+.s3     { border-color: #c8b0e8;             } .s3 .step-n { color: var(--purple); }
+.s4     { border-color: var(--amber-border); } .s4 .step-n { color: var(--amber); }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <h1 class="page-title">HNSW Index — How Search Navigates the Graph</h1>
+  <p class="page-sub">// coarse-to-fine greedy traversal · enter top → greedy hop → descend → collect top-k at bottom</p>
+
+  <!-- ════════════════════════════════════
+       LAYER 2 — TOP
+  ════════════════════════════════════ -->
+  <div class="layer-wrap">
+    <div class="layer-head">
+      <span class="layer-tag tag-top">Layer 2</span>
+      <span class="layer-name">Top Layer — Sparse</span>
+      <span class="layer-desc">3 nodes · long-range "highway" edges · fast coarse jump</span>
+    </div>
+    <div class="layer-body layer-body-top">
+
+      <!-- Left annotation column -->
+      <div class="ann-col">
+        <div class="ann-item">
+          <div class="ann-step"><span class="badge badge-blue">① Enter</span></div>
+          <div class="ann-text">Start at a <strong>fixed predefined</strong> entry node A.<br>The top layer is never fully scanned.<br><em>Entry is fixed — not proximity-based.</em></div>
+        </div>
+        <div class="ann-item">
+          <div class="ann-step"><span class="badge badge-blue">② Greedy Hop</span></div>
+          <div class="ann-text">Check all neighbors of A.<br>D is closer to Q → jump to D.<br>Repeat until no neighbor is closer.<br>D = local minimum in this layer.</div>
+        </div>
+      </div>
+
+      <!-- Right graph column -->
+      <div class="graph-col">
+        <svg viewBox="0 0 580 120">
+          <defs>
+            <marker id="mh" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L8,3z" fill="#1a5fa8"/>
+            </marker>
+          </defs>
+          <!-- Highway edges -->
+          <line x1="68" y1="60" x2="222" y2="60" stroke="#b0c8e8" stroke-width="2.5"/>
+          <line x1="278" y1="60" x2="452" y2="60" stroke="#b0c8e8" stroke-width="2.5"/>
+          <line x1="68" y1="60" x2="452" y2="60" stroke="#b0c8e8" stroke-width="1.5" stroke-dasharray="8,5" opacity="0.45"/>
+
+          <!-- Entry ring on A -->
+          <circle cx="40" cy="60" r="36" fill="none" stroke="#1a5fa8" stroke-width="1.5" stroke-dasharray="5,4" opacity="0.5"/>
+
+          <!-- Greedy hop arc A→D -->
+          <path d="M68,48 Q155,12 222,48" fill="none" stroke="#1a5fa8" stroke-width="2.5" stroke-dasharray="9,5" marker-end="url(#mh)"/>
+
+          <!-- "D closer to Q → hop" callout above arc — well clear of nodes -->
+          <rect x="100" y="4" width="138" height="18" rx="4" fill="#e6eef8" stroke="#b0c8e8" stroke-width="1"/>
+          <text x="169" y="16" font-family="IBM Plex Mono,monospace" font-size="9" fill="#1a5fa8" text-anchor="middle" font-weight="600">D closer to Q → hop</text>
+
+          <!-- Node A -->
+          <circle cx="40" cy="60" r="26" fill="#e6eef8" stroke="#1a5fa8" stroke-width="2.5"/>
+          <text x="40" y="65" font-family="Fraunces,serif" font-size="15" fill="#1a5fa8" text-anchor="middle" font-weight="700">A</text>
+
+          <!-- Node D — active (local min) -->
+          <circle cx="250" cy="60" r="28" fill="#1a5fa8" stroke="#1a5fa8" stroke-width="2"/>
+          <text x="250" y="65" font-family="Fraunces,serif" font-size="15" fill="white" text-anchor="middle" font-weight="700">D</text>
+          <!-- "local min" below D -->
+          <text x="250" y="100" font-family="IBM Plex Mono,monospace" font-size="8" fill="#4a80b8" text-anchor="middle">local min</text>
+          <text x="250" y="111" font-family="IBM Plex Mono,monospace" font-size="8" fill="#4a80b8" text-anchor="middle">no closer neighbor</text>
+
+          <!-- Node G — inactive -->
+          <circle cx="480" cy="60" r="26" fill="#f0f5ff" stroke="#b0c8e8" stroke-width="1.5"/>
+          <text x="480" y="65" font-family="Fraunces,serif" font-size="15" fill="#8ab0d0" text-anchor="middle" font-weight="700">G</text>
+
+          <!-- "long highway" label on edge, right side -->
+          <text x="390" y="48" font-family="IBM Plex Mono,monospace" font-size="8" fill="#8ab0d0" text-anchor="middle">long highway edge</text>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <!-- Descent strip 1 -->
+  <div class="descent-strip">
+    <svg width="14" height="20" viewBox="0 0 14 20"><path d="M7,0 L7,14 M1,8 L7,16 L13,8" fill="none" stroke="#5828b0" stroke-width="2.5" stroke-linejoin="round"/></svg>
+    <span class="descent-label">③ DESCEND → drop to exact same node D in layer below &nbsp;·&nbsp; new finer-grained neighbors now available</span>
+    <svg width="14" height="20" viewBox="0 0 14 20"><path d="M7,0 L7,14 M1,8 L7,16 L13,8" fill="none" stroke="#5828b0" stroke-width="2.5" stroke-linejoin="round"/></svg>
+  </div>
+
+  <!-- ════════════════════════════════════
+       LAYER 1 — MIDDLE
+  ════════════════════════════════════ -->
+  <div class="layer-wrap">
+    <div class="layer-head">
+      <span class="layer-tag tag-mid">Layer 1</span>
+      <span class="layer-name">Middle Layer — Intermediate Density</span>
+      <span class="layer-desc">5 nodes · medium-range edges · greedy hop narrows neighborhood</span>
+    </div>
+    <div class="layer-body layer-body-mid">
+
+      <!-- Left annotation column -->
+      <div class="ann-col">
+        <div class="ann-item">
+          <div class="ann-step"><span class="badge badge-green">Resume Greedy Hop</span></div>
+          <div class="ann-text">Arrived at D (same node, layer below).<br>New neighbors visible: A, B, F, H.<br>B is closer to Q → hop to B.<br>B = local minimum in this layer.</div>
+        </div>
+      </div>
+
+      <!-- Right graph column -->
+      <div class="graph-col">
+        <svg viewBox="0 0 580 110">
+          <!-- Edges -->
+          <line x1="68"  y1="55" x2="138" y2="55" stroke="#a0d0b0" stroke-width="2"/>
+          <line x1="192" y1="55" x2="262" y2="55" stroke="#a0d0b0" stroke-width="2"/>
+          <line x1="318" y1="55" x2="398" y2="55" stroke="#a0d0b0" stroke-width="2"/>
+          <line x1="452" y1="55" x2="532" y2="55" stroke="#a0d0b0" stroke-width="2"/>
+          <!-- skip edges -->
+          <line x1="68"  y1="55" x2="262" y2="55" stroke="#a0d0b0" stroke-width="1.5" stroke-dasharray="5,4" opacity="0.5"/>
+          <line x1="192" y1="55" x2="398" y2="55" stroke="#a0d0b0" stroke-width="1.5" stroke-dasharray="5,4" opacity="0.5"/>
+
+          <!-- Greedy hop arc D→B -->
+          <path d="M318,43 Q258,10 192,43" fill="none" stroke="#1a6e3a" stroke-width="2.5" stroke-dasharray="9,5" marker-end="url(#mh)"/>
+          <rect x="196" y="3" width="130" height="18" rx="4" fill="#e6f4ec" stroke="#a0d0b0" stroke-width="1"/>
+          <text x="261" y="15" font-family="IBM Plex Mono,monospace" font-size="9" fill="#1a6e3a" text-anchor="middle" font-weight="600">B closer to Q → hop</text>
+
+          <!-- Node A -->
+          <circle cx="40"  cy="55" r="24" fill="#f0f8f2" stroke="#a0d0b0" stroke-width="1.5"/>
+          <text x="40"  y="60" font-family="Fraunces,serif" font-size="14" fill="#6aaa80" text-anchor="middle" font-weight="700">A</text>
+          <!-- Node B — active -->
+          <circle cx="165" cy="55" r="26" fill="#1a6e3a" stroke="#1a6e3a" stroke-width="2"/>
+          <text x="165" y="60" font-family="Fraunces,serif" font-size="14" fill="white" text-anchor="middle" font-weight="700">B</text>
+          <text x="165" y="93" font-family="IBM Plex Mono,monospace" font-size="8" fill="#3a8a50" text-anchor="middle">local min</text>
+          <!-- Node D — entry from descent -->
+          <circle cx="290" cy="55" r="26" fill="#e6f4ec" stroke="#1a6e3a" stroke-width="2"/>
+          <text x="290" y="60" font-family="Fraunces,serif" font-size="14" fill="#1a6e3a" text-anchor="middle" font-weight="700">D</text>
+          <text x="290" y="93" font-family="IBM Plex Mono,monospace" font-size="8" fill="#3a8a50" text-anchor="middle">arrived via descent</text>
+          <!-- Node F -->
+          <circle cx="425" cy="55" r="24" fill="#f0f8f2" stroke="#a0d0b0" stroke-width="1.5"/>
+          <text x="425" y="60" font-family="Fraunces,serif" font-size="14" fill="#6aaa80" text-anchor="middle" font-weight="700">F</text>
+          <!-- Node H -->
+          <circle cx="555" cy="55" r="24" fill="#f0f8f2" stroke="#a0d0b0" stroke-width="1.5"/>
+          <text x="555" y="60" font-family="Fraunces,serif" font-size="14" fill="#6aaa80" text-anchor="middle" font-weight="700">H</text>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <!-- Descent strip 2 -->
+  <div class="descent-strip">
+    <svg width="14" height="20" viewBox="0 0 14 20"><path d="M7,0 L7,14 M1,8 L7,16 L13,8" fill="none" stroke="#5828b0" stroke-width="2.5" stroke-linejoin="round"/></svg>
+    <span class="descent-label">③ DESCEND → drop to exact same node B in layer below &nbsp;·&nbsp; all vectors now present</span>
+    <svg width="14" height="20" viewBox="0 0 14 20"><path d="M7,0 L7,14 M1,8 L7,16 L13,8" fill="none" stroke="#5828b0" stroke-width="2.5" stroke-linejoin="round"/></svg>
+  </div>
+
+  <!-- ════════════════════════════════════
+       LAYER 0 — BOTTOM (full width)
+  ════════════════════════════════════ -->
+  <div class="layer-wrap">
+    <div class="layer-head">
+      <span class="layer-tag tag-bot">Layer 0</span>
+      <span class="layer-name">Bottom Layer — Complete Graph (all vectors)</span>
+      <span class="layer-desc">8 nodes · dense local edges · ef_search explores candidates · returns top-k</span>
+    </div>
+
+    <!-- Step badge + explanation row ABOVE the graph -->
+    <div style="display:flex; align-items:flex-start; gap:24px; padding: 4px 24px 12px;">
+      <div>
+        <div style="margin-bottom:6px;"><span class="badge badge-amber">④ Fine-Grained Search — Collect Top-K Nearest Neighbors</span></div>
+        <div style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--ink-mid); line-height:1.6; max-width:700px;">
+          Already in the correct neighborhood. The algorithm explores <strong>ef_search</strong> candidate nodes around the entry point B,
+          computing distances to Q for each one. It keeps a running list of the <strong>k closest matches found so far</strong> —
+          not just one. All highlighted nodes (C, B, D) fall within the candidate window and are ranked by distance to Q.
+          The top-k list is returned as the final result.
+        </div>
+      </div>
+    </div>
+
+    <!-- Graph: full width -->
+    <div style="padding: 0 24px 16px;">
+      <svg viewBox="0 0 852 160">
+        <defs>
+          <marker id="mha" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+            <path d="M0,0 L0,6 L8,3z" fill="#b85a00"/>
+          </marker>
+        </defs>
+
+        <!-- All edges -->
+        <line x1="56"  y1="80" x2="150" y2="80" stroke="#e8c88a" stroke-width="1.5"/>
+        <line x1="202" y1="80" x2="294" y2="80" stroke="#e8c88a" stroke-width="1.5"/>
+        <line x1="346" y1="80" x2="440" y2="80" stroke="#e8c88a" stroke-width="1.5"/>
+        <line x1="492" y1="80" x2="586" y2="80" stroke="#e8c88a" stroke-width="1.5"/>
+        <line x1="638" y1="80" x2="732" y2="80" stroke="#e8c88a" stroke-width="1.5"/>
+        <line x1="784" y1="80" x2="820" y2="80" stroke="#e8c88a" stroke-width="1.5"/>
+        <!-- skip-one dashed -->
+        <line x1="56"  y1="80" x2="294" y2="80" stroke="#e8c88a" stroke-width="1" stroke-dasharray="4,4" opacity="0.55"/>
+        <line x1="150" y1="80" x2="346" y2="80" stroke="#e8c88a" stroke-width="1" stroke-dasharray="4,4" opacity="0.55"/>
+        <line x1="202" y1="80" x2="440" y2="80" stroke="#e8c88a" stroke-width="1" stroke-dasharray="4,4" opacity="0.55"/>
+        <line x1="294" y1="80" x2="492" y2="80" stroke="#e8c88a" stroke-width="1" stroke-dasharray="4,4" opacity="0.55"/>
+        <line x1="346" y1="80" x2="586" y2="80" stroke="#e8c88a" stroke-width="1" stroke-dasharray="4,4" opacity="0.55"/>
+
+        <!-- ef_search candidate window — ellipse centered on B/C/D cluster -->
+        <ellipse cx="248" cy="80" rx="210" ry="52" fill="rgba(184,90,0,0.05)" stroke="#b85a00" stroke-width="1.5" stroke-dasharray="6,3"/>
+
+        <!-- ef_search label ABOVE ellipse, plenty of space -->
+        <text x="248" y="18" font-family="IBM Plex Mono,monospace" font-size="9" fill="#b85a00" text-anchor="middle" font-weight="600">ef_search candidate window</text>
+        <line x1="248" y1="20" x2="248" y2="26" stroke="#b85a00" stroke-width="1" opacity="0.5"/>
+
+        <!-- Distance lines from Q to each result node -->
+        <!-- Q is at (248, 148) -->
+        <line x1="176" y1="98"  x2="240" y2="140" stroke="#c03020" stroke-width="1" stroke-dasharray="3,3" opacity="0.5"/>
+        <line x1="248" y1="100" x2="248" y2="140" stroke="#c03020" stroke-width="1.5" stroke-dasharray="3,3" opacity="0.6"/>
+        <line x1="322" y1="98"  x2="256" y2="140" stroke="#c03020" stroke-width="1" stroke-dasharray="3,3" opacity="0.4"/>
+
+        <!-- Q vector node -->
+        <circle cx="248" cy="148" r="18" fill="#fff0ee" stroke="#c03020" stroke-width="2"/>
+        <text x="248" y="153" font-family="Fraunces,serif" font-size="13" fill="#c03020" text-anchor="middle" font-weight="700">Q</text>
+        <text x="248" y="167" font-family="IBM Plex Mono,monospace" font-size="8" fill="#b85a00" text-anchor="middle">query vector</text>
+
+        <!-- Rank labels on result nodes -->
+        <!-- #1 closest = C -->
+        <text x="248" y="34" font-family="IBM Plex Mono,monospace" font-size="8" fill="#c03020" text-anchor="middle" font-weight="600">#1 closest</text>
+        <!-- #2 = B -->
+        <text x="176" y="34" font-family="IBM Plex Mono,monospace" font-size="8" fill="#b85a00" text-anchor="middle">#2</text>
+        <!-- #3 = D -->
+        <text x="322" y="34" font-family="IBM Plex Mono,monospace" font-size="8" fill="#b85a00" text-anchor="middle">#3</text>
+
+        <!-- ── NODES ── -->
+        <!-- A -->
+        <circle cx="30"  cy="80" r="22" fill="#fffbf5" stroke="#e8c88a" stroke-width="1.5"/>
+        <text x="30"  y="85" font-family="Fraunces,serif" font-size="13" fill="#c8a060" text-anchor="middle" font-weight="700">A</text>
+
+        <!-- B — top-k result #2, entry from descent -->
+        <circle cx="176" cy="80" r="26" fill="#fdf0e0" stroke="#e07820" stroke-width="2.5"/>
+        <text x="176" y="85" font-family="Fraunces,serif" font-size="14" fill="#b85a00" text-anchor="middle" font-weight="700">B</text>
+        <text x="176" y="112" font-family="IBM Plex Mono,monospace" font-size="8" fill="#b85a00" text-anchor="middle">entry · #2 result</text>
+
+        <!-- C — #1 nearest -->
+        <circle cx="248" cy="80" r="28" fill="#c03020" stroke="#c03020" stroke-width="2.5"/>
+        <text x="248" y="85" font-family="Fraunces,serif" font-size="15" fill="white" text-anchor="middle" font-weight="700">C</text>
+        <text x="248" y="115" font-family="IBM Plex Mono,monospace" font-size="8" fill="#c03020" text-anchor="middle">★ nearest (#1)</text>
+
+        <!-- D — top-k result #3 -->
+        <circle cx="322" cy="80" r="24" fill="#fdf0e0" stroke="#e07820" stroke-width="2"/>
+        <text x="322" y="85" font-family="Fraunces,serif" font-size="14" fill="#b85a00" text-anchor="middle" font-weight="700">D</text>
+        <text x="322" y="112" font-family="IBM Plex Mono,monospace" font-size="8" fill="#b85a00" text-anchor="middle">#3 result</text>
+
+        <!-- E -->
+        <circle cx="416" cy="80" r="22" fill="#fffbf5" stroke="#e8c88a" stroke-width="1.5"/>
+        <text x="416" y="85" font-family="Fraunces,serif" font-size="13" fill="#c8a060" text-anchor="middle" font-weight="700">E</text>
+
+        <!-- F -->
+        <circle cx="510" cy="80" r="22" fill="#fffbf5" stroke="#e8c88a" stroke-width="1.5"/>
+        <text x="510" y="85" font-family="Fraunces,serif" font-size="13" fill="#c8a060" text-anchor="middle" font-weight="700">F</text>
+
+        <!-- G -->
+        <circle cx="612" cy="80" r="22" fill="#fffbf5" stroke="#e8c88a" stroke-width="1.5"/>
+        <text x="612" y="85" font-family="Fraunces,serif" font-size="13" fill="#c8a060" text-anchor="middle" font-weight="700">G</text>
+
+        <!-- H -->
+        <circle cx="756" cy="80" r="22" fill="#fffbf5" stroke="#e8c88a" stroke-width="1.5"/>
+        <text x="756" y="85" font-family="Fraunces,serif" font-size="13" fill="#c8a060" text-anchor="middle" font-weight="700">H</text>
+
+      </svg>
+    </div>
+
+    <!-- Top-K results chips row -->
+    <div class="topk-row">
+      <div style="width:100%">
+        <div class="topk-title">Top-K Results returned (ranked by distance to Q)</div>
+        <div class="k-results">
+          <div class="k-chip rank1">
+            <div class="k-dot" style="background:#c03020;"></div>
+            #1 · Node C · closest
+          </div>
+          <div class="k-chip">
+            <div class="k-dot" style="background:#e07820;"></div>
+            #2 · Node B
+          </div>
+          <div class="k-chip">
+            <div class="k-dot" style="background:#e07820;"></div>
+            #3 · Node D
+          </div>
+          <div style="font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--ink-faint); padding: 6px 4px;">
+            ··· up to k results returned, all ranked by distance
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ════════════════════════════════════
+       LEGEND
+  ════════════════════════════════════ -->
+  <div class="legend">
+    <div class="leg-item">
+      <svg width="42" height="12"><line x1="0" y1="6" x2="32" y2="6" stroke="#1a5fa8" stroke-width="2" stroke-dasharray="8,4"/><polygon points="32,3 40,6 32,9" fill="#1a5fa8"/></svg>
+      greedy hop (toward closer neighbor)
+    </div>
+    <div class="leg-item">
+      <svg width="42" height="12"><line x1="0" y1="6" x2="32" y2="6" stroke="#5828b0" stroke-width="2" stroke-dasharray="5,3"/><polygon points="32,3 40,6 32,9" fill="#5828b0"/></svg>
+      descend to same node in layer below
+    </div>
+    <div class="leg-item">
+      <svg width="42" height="4" style="margin:4px 0"><line x1="0" y1="2" x2="42" y2="2" stroke="#b0c8e8" stroke-width="2.5"/></svg>
+      long-range edge (top layer)
+    </div>
+    <div class="leg-item">
+      <svg width="42" height="4" style="margin:4px 0"><line x1="0" y1="2" x2="42" y2="2" stroke="#e8c88a" stroke-width="2"/></svg>
+      local edge (bottom layer)
+    </div>
+    <div class="leg-item">
+      <svg width="20" height="20"><circle cx="10" cy="10" r="9" fill="#e6eef8" stroke="#1a5fa8" stroke-width="2"/></svg>
+      visited / active node
+    </div>
+    <div class="leg-item">
+      <svg width="20" height="20"><circle cx="10" cy="10" r="9" fill="#fdf0e0" stroke="#e07820" stroke-width="2"/></svg>
+      top-k result node
+    </div>
+    <div class="leg-item">
+      <svg width="20" height="20"><circle cx="10" cy="10" r="9" fill="#c03020" stroke="#c03020" stroke-width="2"/></svg>
+      #1 nearest neighbor
+    </div>
+  </div>
+
+  <!-- ════════════════════════════════════
+       STEP CARDS
+  ════════════════════════════════════ -->
+  <div class="steps">
+    <div class="step s1">
+      <div class="step-n">① Enter Top Layer</div>
+      <div class="step-title">Fixed entry node A</div>
+      <div class="step-body">One predefined entry node. Top layer is never fully scanned. Entry point is fixed — not chosen based on proximity to Q.</div>
+    </div>
+    <div class="step s2">
+      <div class="step-n">② Greedy Hop</div>
+      <div class="step-title">Jump toward Q</div>
+      <div class="step-body">Check neighbors. Hop to whichever is closer to Q. Repeat until no neighbor is closer — local minimum reached. Then descend.</div>
+    </div>
+    <div class="step s3">
+      <div class="step-n">③ Descend &amp; Repeat</div>
+      <div class="step-title">Drop to same node below</div>
+      <div class="step-body">At local min, drop to the exact same node in the layer below. New finer-grained neighbors appear. Resume greedy hopping.</div>
+    </div>
+    <div class="step s4">
+      <div class="step-n">④ Bottom Layer Search</div>
+      <div class="step-title">Collect top-k results</div>
+      <div class="step-body">Now in layer 0 with all vectors. Explore ef_search candidates. Rank all by distance to Q. Return the k closest — not just one.</div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

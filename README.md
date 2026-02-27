@@ -243,50 +243,11 @@ The core idea is a multi-layer graph that works a lot like zooming in on a map. 
 
 This layered structure enables a fast "coarse-to-fine" search:
 
-```mermaid
-graph TD
-    subgraph "HNSW Graph Structure"
-        direction TB
-        subgraph "Layer 2 (Top - Sparse)"
-            A2((Node A))
-            D2((Node D))
-            A2 --- D2
-        end
-        subgraph "Layer 1 (Middle)"
-            A1((Node A))
-            B1((Node B))
-            D1((Node D))
-            F1((Node F))
-            A1 --- B1
-            A1 --- D1
-            B1 --- F1
-            D1 --- F1
-        end
-        subgraph "Layer 0 (Bottom - All Nodes)"
-            A0((A))
-            B0((B))
-            C0((C))
-            D0((D))
-            E0((E))
-            F0((F))
-            G0((G))
-            A0 --- B0
-            A0 --- C0
-            B0 --- C0
-            B0 --- F0
-            C0 --- D0
-            D0 --- E0
-            D0 --- G0
-            E0 --- F0
-            F0 --- G0
-        end
-    end
-    Q((Query Vector)) -.->|"1. Enter at top layer"| A2
-    A2 -.->|"2. Navigate down"| A1
-    A1 -.->|"3. Greedy search"| B1
-    B1 -.->|"4. Descend to bottom"| B0
-    B0 -.->|"5. Fine-grained search"| C0
-```
+<p align="center">
+  <img src="doc/plots/hnsw-graph.png" alt="HNSW Index — How Search Navigates the Graph" />
+</p>
+
+> For the full interactive version of this diagram, see [doc/hnsw-graph.html](doc/hnsw-graph.html).
 
 **How the search algorithm navigates this graph:**
 
@@ -300,8 +261,8 @@ The total number of distance comparisons is logarithmic in the dataset size, whi
 **Key parameters:**
 
 - **`m`** (build-time, default: 16) — The maximum number of edges (connections) a single node can have to other nodes in a layer. It dictates how many neighbors the algorithm checks during the greedy search step. Our benchmark uses `m = 16`.
-- **`ef_construction`** (build-time, default: 64) — Size of the dynamic candidate list during index construction. Higher values produce a higher-quality graph but take longer to build. Our benchmark uses `ef_construction = 64`.
-- **`ef_search`** (query-time, default: 40) — Size of the candidate priority queue during the Layer 0 search. This directly controls the recall vs. speed tradeoff: higher values explore more candidates before stopping, giving better recall at the cost of higher latency. Can be set per-session with `SET hnsw.ef_search = 100`.
+- **`ef_construction`** (build-time, default: 64) — Controls the quality of the edges built into the graph. When a new vector is inserted, the algorithm must decide which existing nodes to connect it to. It does this by running a search (similar to the greedy traversal described above) to find the best neighbors for the new node. `ef_construction` is the size of the candidate list used during that neighbor search: a larger list means the algorithm evaluates more potential neighbors before selecting the best `m` to create edges to, producing a higher-quality graph where each node is connected to its truly closest neighbors. The tradeoff is build time — a larger candidate list means more distance computations per insertion, so index construction takes longer. Our benchmark uses `ef_construction = 64`.
+- **`ef_search`** (query-time, default: 40) — Controls how thoroughly the algorithm explores the bottom layer (Layer 0) during a query. Recall from step 4 above: once the search descends to Layer 0, it explores the local neighborhood to collect the best candidates. `ef_search` is the size of the priority queue that holds these candidates. As the algorithm hops from node to node in Layer 0, it adds each visited neighbor to this queue, keeping only the closest `ef_search` candidates. A larger queue means the search casts a wider net — it continues exploring outward from the query vector for longer, visiting more nodes before concluding that it has found the best results. This directly controls the recall vs. speed tradeoff: `ef_search = 40` (the default) terminates quickly but may miss true nearest neighbors in dense regions, while `ef_search = 400` explores 10x more of the graph, giving near-perfect recall at higher latency. Must be ≥ `top_k`. Can be set per-session with `SET hnsw.ef_search = 100`.
 
 **The critical detail for filtered search:**
 
