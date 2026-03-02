@@ -9,8 +9,7 @@ Goal: determine *why* top_k >= 50 causes a performance cliff on filtered search.
 Is it a plan change (seq scan vs index scan)? An HNSW limitation? Something else?
 
 Usage:
-    export PG_HOST="51.104.162.145"
-    export PG_PASSWORD="<password>"
+    export $(grep -v '^#' .env.azure | xargs)
     uv run python scripts/cnpg_filtered_search_diagnosis.py
 """
 
@@ -31,11 +30,11 @@ logger = setup_structlog()
 # ---------------------------------------------------------------------------
 # Connection parameters — override with env vars
 # ---------------------------------------------------------------------------
-PG_HOST = os.getenv("PG_HOST", "51.104.162.145")
-PG_PORT = int(os.getenv("PG_PORT", "5432"))
+PG_HOST = os.getenv("CNPG_PG_HOST", "51.104.162.145")
+PG_PORT = int(os.getenv("CNPG_PG_PORT", "5432"))
 PG_DATABASE = os.getenv("VECTOR_PG_DATABASE", "benchmark_vectors")
-PG_USER = os.getenv("PG_USER", "benchmark_user")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "")
+PG_USER = os.getenv("CNPG_PG_USER", "benchmark_user")
+PG_PASSWORD = os.getenv("CNPG_PG_PASSWORD", "")
 TABLE_NAME = os.getenv("TABLE_NAME", "wot_chunks_2_5m")
 SSLMODE = os.getenv("PGSSLMODE", "require")
 
