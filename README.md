@@ -364,35 +364,47 @@ To recap the two problems stacked on top of each other:
 
 ### B-Tree Index and Bitmap Heap Scan
 
-When the query planner abandons the HNSW index at `top_k = 50`, it switches to an alternative plan built around two things working together: a B-tree index to find matching rows, and a Bitmap Heap Scan to fetch them from disk.
+When a filtered vector search query combines a `WHERE` clause with `ORDER BY embedding <=> $1 LIMIT N`, the query planner may abandon the HNSW index at higher `top_k` values and switch to an alternative plan built around two things working together: a B-tree index to find matching rows, and a Bitmap Heap Scan to fetch them from disk. The exact tipping point depends on filter selectivity, dataset size, and planner cost parameters — in our benchmark, this switch happened at around `top_k = 42` for filters matching 2.6% to 8.4% of the table. To understand why this alternative plan leads to catastrophic performance, it helps to walk through each step using the actual data.
 
-**Phase 1: The B-tree index finds which rows match the filter**
-
-The expression index `CREATE INDEX ON wot_chunks_2_5m ((metadata->>'book_name'))` pre-extracts the book name from every row and stores those values in a sorted tree. The tree is organised in levels, each level narrowing the search — similar to how you find a word in a dictionary by first opening near the right letter, then narrowing further. Finding `'00. New Spring'` among 16 distinct book names means the database descends just a handful of levels and arrives directly at the matching entries, without ever looking at the other 2.4 million rows. The output of this step is a list of 63,945 row locations — essentially a list of addresses saying "this matching row lives on disk page 4021, slot 3."
-
-This step takes about 10 ms and is genuinely fast.
+The diagram below shows the complete three-phase plan that PostgreSQL executes when it abandons the HNSW index. Follow it top to bottom as we walk through each phase.
 
 <p align="center">
-  <img src="doc/b-tree-index.png" alt="B-Tree Index on metadata->>'book_name' — How PostgreSQL Finds 63,945 Rows in 10ms" />
+  <img src="doc/b-tree-index-and-bitmap-heap.png" alt="B-Tree Index Traversal, Bitmap Heap Scan, and Brute-Force Distance Calculation — The Three Phases of the Catastrophic Plan" />
 </p>
 
-**Phase 2: The Bitmap Heap Scan fetches those rows from disk**
+#### Phase 1: B-Tree Index Traversal (~10 ms)
 
-Now PostgreSQL has 63,945 row addresses. The naive approach — fetching each row one by one by following each address — would cause chaotic random disk access: fetch page 4021, then page 18, then page 4021 again. For 63,945 rows scattered across 50,137 physical disk pages, this would be extremely slow.
+The expression index `CREATE INDEX ON wot_chunks_2_5m ((metadata->>'book_name'))` stores one entry for every row in the 2.5 million row table — specifically, the `book_name` value extracted from that row, plus the physical address of where that row lives on disk. PostgreSQL calls this address a `ctid` (tuple ID) — it means "go to disk page 4021, and inside that page, the row is in slot 3." The B-tree organises all of these entries into a three-level structure, visible in the top section of the diagram.
 
-Instead, PostgreSQL builds an in-memory bitmap — a simple list with one slot per disk page, marked 0 or 1. Any page containing at least one matching row gets marked 1. Then it reads through this bitmap from start to finish, fetching all marked pages in sequential disk order, which is far more efficient. Once each page is loaded into memory, it picks out the exact matching rows from it.
+**Leaf nodes** sit at the bottom of the tree. Each leaf is a single 8 KB disk page holding a sorted list of `(book_name, ctid)` pairs. All 63,945 entries for `'00. New Spring'` live here, spanning roughly 160 to 320 leaf pages. Crucially, leaf nodes are linked to each other in a chain — once PostgreSQL reaches the first matching leaf, it reads forward through consecutive leaf pages without navigating the tree again.
 
-This is the Bitmap Heap Scan. It is a smart way to fetch a large number of scattered rows from disk, and for the filtering step alone it is a reasonable choice.
+**Branch nodes** sit above the leaves. They do not store any row addresses — only a few key values that act as signposts, telling the search which subtree to descend into. As shown in the diagram, a branch node containing `["Eye of the World", "Fires of Heaven"]` directs the search left, middle, or right based on alphabetical comparison.
 
-<p align="center">
-  <img src="doc/bitmap-heap.png" alt="Bitmap Heap Scan — What Happens After the B-Tree Finds 63,945 Rows" />
-</p>
+**The root node** is the single entry point at the top. Every search begins here. For `'00. New Spring'`, the root's keys (`"Lord of Chaos"`, `"The Shadow Rising"`) immediately direct the search left, the branch node narrows further, and within 3 to 4 node hops the search arrives at the first matching leaf. From there it reads forward through the linked leaf chain, collecting ctids until the book name changes.
 
-**Why this plan still causes the 215-second disaster**
+The result: 63,945 physical row addresses collected in about 10 ms, regardless of the table having 2.5 million rows.
 
-Both phases together complete in about 21 ms. The disaster happens in what comes next. Those 63,945 fetched rows still need to be sorted by vector distance to answer `ORDER BY embedding <=> $1 LIMIT 50`. That means computing cosine distance across 1,536 dimensions on every single one of them — 63,945 brute-force distance calculations just to find the closest 50.
+#### Phase 2: Bitmap Heap Scan (~11 ms)
 
-The planner chose this path because it priced each vector distance computation the same as comparing two integers. On paper the plan looked cheap. In reality, those 63,945 distance computations are where the 215 seconds went.
+Now PostgreSQL has 63,945 ctids — but these addresses are scattered across the table. The rows for `'00. New Spring'` were not inserted together; the table stores all books interleaved. A single disk page might contain one `'00. New Spring'` row alongside several `'Lord of Chaos'` rows and a handful of `'The Eye of the World'` rows. The 63,945 matching rows end up spread across 50,137 different physical disk pages.
+
+Following these addresses one by one would cause chaotic random disk I/O — fetching page 71, then jumping to page 18004, then back to page 312. This is exactly the problem the Bitmap Heap Scan solves, as shown in the middle section of the diagram.
+
+PostgreSQL builds a tiny in-memory bitmap — one bit per disk page in the entire table. The table spans roughly 200,000 pages, so the bitmap is just 200,000 bits (a few kilobytes). It marks a 1 for every page that contains at least one matching row, and a 0 for everything else. At this point, nothing has been fetched from disk yet.
+
+Then PostgreSQL reads through this bitmap from start to finish. Pages marked 0 are skipped entirely — the database never touches disk for them. Pages marked 1 are fetched, in sequential physical order. This converts 63,945 random disk seeks into a sequential read of 50,137 pages. Each page is loaded exactly once.
+
+Once a marked page is loaded into memory, PostgreSQL checks which rows inside it actually match the filter — because a single page can contain rows from multiple books. Not every row on a marked page belongs to `'00. New Spring'`. This is the "Recheck Condition" step visible in the `EXPLAIN ANALYZE` output. The ~150,000 pages containing no matching rows are never loaded at all.
+
+Both phases together complete in about 21 ms. For the filtering step alone, this is a fast and reasonable plan.
+
+#### Phase 3: Brute-Force Distance Calculation (~215 seconds)
+
+The catastrophe is in what the planner scheduled next, shown in the red section at the bottom of the diagram.
+
+Those 63,945 fetched rows still need to be sorted by vector distance to answer `ORDER BY embedding <=> $1 LIMIT 50`. That means computing cosine distance across 1,536 dimensions on every single one of them — 63,945 brute-force distance calculations, roughly 98 million floating-point operations, just to find the closest 50.
+
+The planner chose this path because it priced each vector distance computation at `cpu_operator_cost = 0.0025` — the same cost as comparing two integers. On paper, the entire plan looked inexpensive. In reality, a 1,536-dimensional cosine distance computation is thousands of times more expensive than a scalar comparison, and those 63,945 distance computations are where the 215 seconds went.
 
 ### GIN Index and Full-Text Search
 
