@@ -31,7 +31,7 @@ This article walks through the full technical investigation that uncovered the r
 I ran this investigation on a self-hosted PostgreSQL cluster on Azure Kubernetes Service (AKS), managed by the **CloudNativePG (CNPG) operator**. The architecture uses two separate AKS clusters: one dedicated to hosting the PostgreSQL database, and another dedicated to running the benchmark workloads. Both clusters are deployed in the **same Azure region (`northeurope`)** to rule out geographic latency as a variable in the benchmark results. In a production system, your client application would typically run on the same AKS cluster as the CloudNativePG-managed PostgreSQL instance, communicating over the cluster-internal network. Here, the separation into two clusters is intentional: it isolates benchmark workload resource consumption from the database, ensuring that CPU and memory measurements on the database node reflect only PostgreSQL's behavior.
 
 <p align="center">
-  <img src="doc/architecture.png" alt="Infrastructure Architecture" />
+  <img src="doc/diagrams/architecture.png" alt="Infrastructure Architecture" />
 </p>
 
 The architecture has four layers. At the infrastructure level, two AKS clusters provide compute isolation: one hosts only the PostgreSQL database (managed by the CloudNativePG operator), while the other runs benchmark workloads as Kubernetes Jobs. Azure Container Registry stores both Docker images (the custom PostgreSQL + pgvector image and the Python benchmark engine) while Azure Blob Storage holds the Parquet datasets, mounted into benchmark pods via PersistentVolumeClaims. Prometheus and Grafana run on the database cluster to capture PostgreSQL-specific metrics (cache hit ratio, sequential vs index scans, lock contention, WAL throughput) during benchmark execution. All benchmark jobs are submitted from a local machine via `helm install`, which creates Kubernetes Jobs on the benchmark cluster. These jobs connect to the PostgreSQL instance over the Azure Load Balancer, execute the insert, index creation, and retrieval benchmarks, and write structured results (QPS, latency percentiles, throughput) to a separate Azure Managed PostgreSQL instance for post-execution analysis and visualization.
@@ -92,7 +92,7 @@ The _Wheel of Time_ (WoT) is a high fantasy book series by Robert Jordan and Bra
 The base dataset contains **100,105 real text chunk embeddings** generated using OpenAI's `text-embedding-ada-002` model (1,536 dimensions). To test pgvector at production scale, I synthetically expanded this to **2.5 million vectors** by duplicating text chunks with varied metadata combinations and generating synthetic embeddings, preserving the original data distribution characteristics while reaching a dataset size that stresses PostgreSQL's query planner and buffer cache.
 
 <p align="center">
-  <img src="doc/dataset-creation.png" alt="How the Benchmark Dataset Was Built" />
+  <img src="doc/diagrams/dataset-creation.png" alt="How the Benchmark Dataset Was Built" />
 </p>
 
 The benchmark uses two Parquet datasets stored in Azure Blob Storage:
@@ -103,7 +103,7 @@ The benchmark uses two Parquet datasets stored in Azure Blob Storage:
 The `metadata->>'book_name'` field has **16 distinct values** (one per book), with the smallest book containing 63,945 rows (2.6%) and the largest containing 209,226 rows (8.4%). This uneven distribution tests the query planner's behavior across different filter selectivities.
 
 <p align="center">
-  <img src="doc/book-filter-distribution.png" alt="Book Filter Selectivity Distribution (16 Books, 2.5M Total Rows)" />
+  <img src="doc/diagrams/book-filter-distribution.png" alt="Book Filter Selectivity Distribution (16 Books, 2.5M Total Rows)" />
 </p>
 
 The benchmark framework is **dataset-agnostic**: you can point it at your own Parquet files and a YAML configuration to find the exact `top_k` threshold where the planner abandons the HNSW index for your data distribution. For full dataset schemas and bring-your-own-dataset instructions, see [DATASET.md](doc/DATASET.md).
@@ -115,7 +115,7 @@ The benchmark framework is **dataset-agnostic**: you can point it at your own Pa
 Before running retrieval benchmarks, the data must be ingested and indexed. Data ingestion uses PostgreSQL's `COPY` command with binary format via `psycopg3`, which achieves 10 to 50x faster throughput than standard `INSERT` statements; the full 2.5 million row insert completed in approximately 27 minutes. Three indexes are then created on the table: an **HNSW index** on the embedding column for approximate nearest neighbor search (`m = 16`, `ef_construction = 64`), a **B-tree expression index** on `metadata->>'book_name'` for filtered search, and a **GIN index** on `to_tsvector('english', content)` for full-text search. The HNSW index build on 2.5 million 1,536-dimensional vectors took approximately 4 hours and 45 minutes.
 
 <p align="center">
-  <img src="doc/benchmark-execution-flow.png" alt="Benchmark Execution Flow — From Ingestion to Results" />
+  <img src="doc/diagrams/benchmark-execution-flow.png" alt="Benchmark Execution Flow — From Ingestion to Results" />
 </p>
 
 **Benchmark scripts** (`src/pgvector/`):
@@ -174,7 +174,7 @@ helm install cnpg-pg-retrieval-asyncpg-wot-2m5 \
 The retrieval benchmark ([03_retrieval_asyncpg.py](src/pgvector/03_retrieval_asyncpg.py)) tests three search patterns at varying concurrency levels (1, 2, 4, 8, 16, 32, 50, 100 concurrent queries) and `top_k` values (1, 5, 10, 20, 50, 100):
 
 <p align="center">
-  <img src="doc/search-patterns.png" alt="One Query Row → Three Search Patterns" />
+  <img src="doc/diagrams/search-patterns.png" alt="One Query Row → Three Search Patterns" />
 </p>
 
 ### 1. Vector Search (Pure ANN)
@@ -264,7 +264,7 @@ This layered structure enables a fast "coarse-to-fine" search:
   <img src="doc/plots/hnsw-graph.png" alt="HNSW Index — How Search Navigates the Graph" />
 </p>
 
-> For the full interactive version of this diagram, see [doc/hnsw-graph.html](doc/hnsw-graph.html).
+> For the full interactive version of this diagram, see [doc/diagrams/hnsw-graph.html](doc/diagrams/hnsw-graph.html).
 
 **How the search algorithm navigates this graph:**
 
@@ -283,7 +283,7 @@ The total number of distance comparisons is logarithmic in the dataset size, whi
   - Our benchmark uses `m = 16` (the pgvector default), which provides a practical balance for most workloads.
 
 <p align="center">
-  <img src="doc/m-Parameter.png" alt="m: Max Connections per Node (Build & Search)" />
+  <img src="doc/diagrams/m-Parameter.png" alt="m: Max Connections per Node (Build & Search)" />
 </p>
 
 - **`ef_construction`** (build-time, default: 64) — Controls the quality of the edges built into the graph. When a new vector is inserted, the algorithm must decide which existing nodes to connect it to. It does this by running a search (similar to the greedy traversal described above) to find the best neighbors for the new node. `ef_construction` is the size of the candidate list used during that neighbor search: a larger list means the algorithm evaluates more potential neighbors before selecting the best `m` to create edges to.
@@ -292,7 +292,7 @@ The total number of distance comparisons is logarithmic in the dataset size, whi
   - Our benchmark uses `ef_construction = 64` (the pgvector default). For production systems where index build time is acceptable (our 2.5M-vector build took ~4h 45m), values of 128–256 are common.
 
 <p align="center">
-  <img src="doc/ef_construction.png" alt="ef_construction: Build Candidate Pool (Build-Time Only)" />
+  <img src="doc/diagrams/ef_construction.png" alt="ef_construction: Build Candidate Pool (Build-Time Only)" />
 </p>
 
 - **`ef_search`** (query-time, default: 40) — Controls how thoroughly the algorithm explores the bottom layer (Layer 0) during a query. Recall from step 4 above: once the search descends to Layer 0, it explores the local neighborhood to collect the best candidates. `ef_search` is the size of the priority queue that holds these candidates. As the algorithm hops from node to node in Layer 0, it adds each visited neighbor to this queue, keeping only the closest `ef_search` candidates.
@@ -301,7 +301,7 @@ The total number of distance comparisons is logarithmic in the dataset size, whi
   - Must be ≥ `top_k` (you cannot return more results than the queue can hold). Can be tuned per-session without rebuilding the index: `SET hnsw.ef_search = 100`.
 
 <p align="center">
-  <img src="doc/ef_search.png" alt="ef_search: Search Queue Size (Query-Time Only)" />
+  <img src="doc/diagrams/ef_search.png" alt="ef_search: Search Queue Size (Query-Time Only)" />
 </p>
 
 **The critical detail for filtered search:**
@@ -313,7 +313,7 @@ To understand why this breaks down, consider a concrete example. The smallest bo
 Since only 2.6% of all vectors belong to "New Spring", the index must retrieve, on average, about **38 candidates** before it finds a single one that passes the filter ($\frac{1}{0.026} \approx 38.4$). The other 37 are discarded. To accumulate 50 valid results after filtering, the index therefore needs to traverse and evaluate roughly $50 \times 38.4 \approx$ **1,920 candidate vectors** from the graph — scanning through 1,920 nearest neighbors just to find 50 that belong to the correct book.
 
 <p align="center">
-  <img src="doc/HNSW-Post-Filtering.png" alt="HNSW Post-Filtering: How a WHERE Clause Forces Graph Over-Exploration" />
+  <img src="doc/diagrams/HNSW-Post-Filtering.png" alt="HNSW Post-Filtering: How a WHERE Clause Forces Graph Over-Exploration" />
 </p>
 
 This post-filter behavior creates two compounding problems. The first is an **index-level recall problem**: with the default `ef_search = 40`, the HNSW index performs a single traversal, collects at most 40 candidates, and stops. If a selective filter discards most of them, the index simply cannot produce enough matching rows — asking for `LIMIT 50` with a 2.6% filter match rate would require roughly 1,920 candidates, far beyond the 40 the index provides. The second is a **planner-level cost estimation problem**: PostgreSQL's query planner looks at this required effort, estimates the cost of the HNSW path using a cost model that dramatically underprices vector distance computation, concludes the brute-force bitmap scan path is cheaper, and abandons the HNSW index entirely. This planner decision — not the index's scanning limitation — is the root of the catastrophic performance cliff investigated in this article.
@@ -333,7 +333,7 @@ Iterative scan has three modes, controlled by the `hnsw.iterative_scan` GUC (Gra
 - **`relaxed_order`** — Enables iterative rescanning but allows results to be **slightly out of order** by distance. This is faster than `strict_order` because the index can emit rows from resumed batches without waiting to confirm global ordering. The results are still approximate nearest neighbors, but two adjacent rows might be swapped in distance ranking. For most practical applications (RAG retrieval, recommendation systems), this is indistinguishable from strict ordering. This mode provides the best recall-to-performance ratio for filtered queries.
 
 <p align="center">
-  <img src="doc/iterative_scan.png" alt="hnsw.iterative_scan: Three Modes of HNSW Graph Traversal" />
+  <img src="doc/diagrams/iterative_scan.png" alt="hnsw.iterative_scan: Three Modes of HNSW Graph Traversal" />
 </p>
 
 Usage:
@@ -359,7 +359,7 @@ To recap the two problems stacked on top of each other:
 2. **The planner problem** (unsolved): PostgreSQL's cost model underprices vector distance computation, causing it to prefer brute-force over HNSW at moderate `top_k` values — before iterative scan ever gets a chance to run.
 
 <p align="center">
-  <img src="doc/Two-Compounding-Problems.png" alt="Two Compounding Problems Behind the Performance Cliff" />
+  <img src="doc/diagrams/Two-Compounding-Problems.png" alt="Two Compounding Problems Behind the Performance Cliff" />
 </p>
 
 ### B-Tree Index and Bitmap Heap Scan
@@ -369,7 +369,7 @@ When a filtered vector search query combines a `WHERE` clause with `ORDER BY emb
 The diagram below shows the complete three-phase plan that PostgreSQL executes when it abandons the HNSW index. Follow it top to bottom as we walk through each phase.
 
 <p align="center">
-  <img src="doc/b-tree-index-and-bitmap-heap.png" alt="B-Tree Index Traversal, Bitmap Heap Scan, and Brute-Force Distance Calculation — The Three Phases of the Catastrophic Plan" />
+  <img src="doc/diagrams/b-tree-index-and-bitmap-heap.png" alt="B-Tree Index Traversal, Bitmap Heap Scan, and Brute-Force Distance Calculation — The Three Phases of the Catastrophic Plan" />
 </p>
 
 #### Phase 1: B-Tree Index Traversal (~10 ms)
@@ -985,6 +985,7 @@ pgvector-filtering-investigation/
     ├── CNPG_PGVECTOR_SETUP.md         # Full CNPG cluster setup guide
     ├── CNPG_MONITORING_SETUP.md        # Prometheus/Grafana monitoring setup
     ├── execution-guide.md             # Docker build, secrets, PVC, Helm commands
+    ├── diagrams/                       # Article diagrams (architecture, HNSW, B-tree, etc.)
     ├── plots/                          # Benchmark result charts
     └── screenshots/cnpg/              # Prometheus metric screenshots
 ```
