@@ -12,8 +12,7 @@ Tests:
   5. Timed runs (no EXPLAIN) for accurate latency comparison
 
 Usage:
-    export PG_HOST="51.104.162.145"
-    export PG_PASSWORD="<password>"
+    export $(grep -v '^#' .env.azure | xargs)
     uv run python scripts/cnpg_hybrid_search_diagnosis.py
 """
 
@@ -31,11 +30,11 @@ from shared.logger_structlog import setup_structlog
 
 logger = setup_structlog()
 
-PG_HOST = os.getenv("PG_HOST", "51.104.162.145")
-PG_PORT = int(os.getenv("PG_PORT", "5432"))
+PG_HOST = os.getenv("CNPG_PG_HOST", "51.104.162.145")
+PG_PORT = int(os.getenv("CNPG_PG_PORT", "5432"))
 PG_DATABASE = os.getenv("VECTOR_PG_DATABASE", "benchmark_vectors")
-PG_USER = os.getenv("PG_USER", "benchmark_user")
-PG_PASSWORD = os.getenv("PG_PASSWORD", "")
+PG_USER = os.getenv("CNPG_PG_USER", "benchmark_user")
+PG_PASSWORD = os.getenv("CNPG_PG_PASSWORD", "")
 TABLE_NAME = os.getenv("TABLE_NAME", "wot_chunks_2_5m")
 SSLMODE = os.getenv("PGSSLMODE", "require")
 
