@@ -137,11 +137,12 @@ def plot_dashboard_style(df: pd.DataFrame) -> None:
             linewidth=2.2, markersize=6, alpha=0.9,
         )
 
-    # Styling: dark theme matching the dashboard
-    bg_color = "#0f172b"
-    paper_color = "#1d293d"
-    text_color = "#e2e8f0"
-    grid_color = "#314158"
+    # Styling: clean white theme for article
+    bg_color = "#ffffff"
+    paper_color = "#ffffff"
+    text_color = "#1a1a2e"
+    grid_color = "#e0e0e0"
+    spine_color = "#cccccc"
 
     for ax, ylabel, title in [
         (ax_qps, "Queries Per Second (QPS)", "QPS"),
@@ -150,14 +151,14 @@ def plot_dashboard_style(df: pd.DataFrame) -> None:
         ax.set_facecolor(bg_color)
         ax.set_ylabel(ylabel, fontsize=12, color=text_color, fontweight="bold")
         ax.tick_params(colors=text_color, labelsize=9)
-        ax.grid(True, color=grid_color, alpha=0.5, linewidth=0.5)
+        ax.grid(True, color=grid_color, alpha=0.6, linewidth=0.6)
         for spine in ax.spines.values():
-            spine.set_color(grid_color)
+            spine.set_color(spine_color)
 
         ax.legend(
             fontsize=10, loc="upper left",
-            facecolor=bg_color, edgecolor=grid_color,
-            labelcolor=text_color, framealpha=0.9,
+            facecolor=bg_color, edgecolor=spine_color,
+            labelcolor=text_color, framealpha=0.95,
         )
 
     # Use log scale on latency to make both low and high values visible
