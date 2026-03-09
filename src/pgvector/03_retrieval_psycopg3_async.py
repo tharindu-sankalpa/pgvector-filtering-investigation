@@ -169,6 +169,11 @@ async def execute_filtered_search(
     """
     Execute a filtered vector search and return latency in seconds.
 
+    Sets hnsw.iterative_scan before the query so pgvector expands the HNSW graph
+    in batches until top_k filter-passing results are found, guaranteeing a full
+    result set even for selective predicates.  The setting is RESET in a finally
+    block so the connection returns to the pool in a clean state.
+
     Args:
         pool: Connection pool
         query_embedding: Vector embedding
@@ -181,16 +186,27 @@ async def execute_filtered_search(
             async with conn.cursor() as cur:
                 ef = common.compute_hnsw_ef_search(top_k)
                 await cur.execute(f"SET hnsw.ef_search = {ef}")
+                # Enable iterative graph expansion for filtered search so the planner
+                # keeps walking the HNSW graph until it has collected top_k rows that
+                # satisfy the WHERE predicate, rather than silently short-returning.
+                await cur.execute(f"SET hnsw.iterative_scan = '{common.HNSW_ITERATIVE_SCAN}'")
 
-                t0 = time.perf_counter()
+                try:
+                    t0 = time.perf_counter()
 
-                await cur.execute(
-                    common.get_filtered_search_query(filter_field=filter_field),
-                    (query_embedding, filter_value, query_embedding, top_k)
-                )
-                await cur.fetchall()
+                    await cur.execute(
+                        common.get_filtered_search_query(filter_field=filter_field),
+                        (query_embedding, filter_value, query_embedding, top_k)
+                    )
+                    await cur.fetchall()
 
-                return time.perf_counter() - t0
+                    elapsed = time.perf_counter() - t0
+                finally:
+                    # Always reset — even if the query raised — so the connection
+                    # goes back to the pool without iterative_scan still active.
+                    await cur.execute("RESET hnsw.iterative_scan")
+
+                return elapsed
     except Exception as e:
         logger.warning("query_failed", error=str(e))
         return None
@@ -391,7 +407,8 @@ async def main_async():
                 pool_min=common.POOL_MIN_SIZE,
                 pool_max=common.POOL_MAX_SIZE,
                 hnsw_ef_search_min=common.HNSW_EF_SEARCH_MIN,
-                hnsw_ef_search_formula="max(HNSW_EF_SEARCH_MIN, top_k)")
+                hnsw_ef_search_formula="max(HNSW_EF_SEARCH_MIN, top_k)",
+                hnsw_iterative_scan=common.HNSW_ITERATIVE_SCAN)
 
     # Load queries
     queries = dataset.load_test_queries(common.QUERY_FILE, limit=common.NUM_QUERIES)

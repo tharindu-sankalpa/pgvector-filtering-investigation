@@ -100,6 +100,26 @@ def compute_hnsw_ef_search(top_k: int) -> int:
     return max(HNSW_EF_SEARCH_MIN, top_k)
 
 
+# HNSW iterative_scan mode for filtered search (pgvector 0.8.x+).
+#
+# The core problem: without iterative_scan, the planner explores exactly
+# ef_search candidates from the HNSW graph and discards those that fail the
+# WHERE predicate.  If fewer than top_k candidates survive, the result set is
+# silently short — at top_k=37, ef_search=64 a dense book can yield only 6 rows.
+#
+# strict_order: expand the graph in batches until top_k filter-passing results
+#               are found (or the graph is exhausted).  Results returned in exact
+#               distance order — same ranking semantics as a sequential scan.
+# relaxed_order: same iterative expansion but results may be returned slightly
+#                out of order (faster, acceptable for ANN workloads).
+# off: disabled — default pgvector behaviour, may return fewer than top_k results.
+#
+# Scope: SET only inside execute_filtered_search; RESET immediately after.
+# Vector/hybrid search functions are unaffected — iterative expansion is a no-op
+# on unfiltered queries and would add overhead without benefit.
+HNSW_ITERATIVE_SCAN = os.getenv("HNSW_ITERATIVE_SCAN", "strict_order")
+
+
 # =============================================================================
 # Pool Configuration
 # =============================================================================
