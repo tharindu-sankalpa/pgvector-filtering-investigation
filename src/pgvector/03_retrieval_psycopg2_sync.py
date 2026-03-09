@@ -27,7 +27,12 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
+
+# (latency_seconds, row_count) — returned by every execute_*_search function.
+# None signifies a failed query. row_count lets the aggregation layer verify
+# that the database actually returned the requested number of results.
+QueryResult = Optional[Tuple[float, int]]
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -159,8 +164,8 @@ def execute_vector_search(
     conn_pool: pool.ThreadedConnectionPool,
     query_embedding: np.ndarray,
     top_k: int
-) -> Optional[float]:
-    """Execute a pure vector search and return latency in seconds."""
+) -> QueryResult:
+    """Execute a pure vector search and return (latency, row_count)."""
     conn = conn_pool.getconn()
     try:
         ensure_vector_registered(conn)
@@ -175,9 +180,9 @@ def execute_vector_search(
                 common.get_vector_search_query(),
                 (query_embedding, query_embedding, top_k)
             )
-            cur.fetchall()
+            rows = cur.fetchall()
             
-            return time.perf_counter() - t0
+            return (time.perf_counter() - t0, len(rows))
     except Exception as e:
         logger.warning("query_failed", error=str(e))
         return None
@@ -191,7 +196,7 @@ def execute_filtered_search(
     filter_field: str,
     filter_value: str,
     top_k: int
-) -> Optional[float]:
+) -> QueryResult:
     """
     Execute a filtered vector search and return latency in seconds.
 
@@ -226,7 +231,7 @@ def execute_filtered_search(
                     common.get_filtered_search_query(filter_field=filter_field),
                     (query_embedding, filter_value, query_embedding, top_k)
                 )
-                cur.fetchall()
+                rows = cur.fetchall()
 
                 elapsed = time.perf_counter() - t0
             finally:
@@ -234,7 +239,7 @@ def execute_filtered_search(
                 # goes back to the pool without iterative_scan still active.
                 cur.execute("RESET hnsw.iterative_scan")
 
-            return elapsed
+            return (elapsed, len(rows))
     except Exception as e:
         logger.warning("query_failed", error=str(e))
         return None
@@ -247,8 +252,8 @@ def execute_hybrid_search(
     query_embedding: np.ndarray,
     keyword: str,
     top_k: int
-) -> Optional[float]:
-    """Execute a hybrid (vector + text) search and return latency in seconds."""
+) -> QueryResult:
+    """Execute a hybrid (vector + text) search and return (latency, row_count)."""
     conn = conn_pool.getconn()
     try:
         ensure_vector_registered(conn)
@@ -272,9 +277,9 @@ def execute_hybrid_search(
                  keyword, keyword, keyword, top_k * 2,
                  top_k)
             )
-            cur.fetchall()
+            rows = cur.fetchall()
             
-            return time.perf_counter() - t0
+            return (time.perf_counter() - t0, len(rows))
     except Exception as e:
         logger.warning("query_failed", error=str(e))
         return None
@@ -332,7 +337,7 @@ def run_benchmark_scenario(
 
     filter_field = get_filter_field(dataset_type)
 
-    def worker(query_idx: int) -> Optional[float]:
+    def worker(query_idx: int) -> QueryResult:
         query = queries[query_idx % len(queries)]
         query_embedding = np.array(query['embedding'])
 
@@ -358,20 +363,36 @@ def run_benchmark_scenario(
             latencies.append(future.result())
     
     total_duration = time.perf_counter() - start_time
-    
-    valid_latencies = [l for l in latencies if l is not None]
-    failed_count = len(latencies) - len(valid_latencies)
-    
+
+    valid_results = [r for r in latencies if r is not None]
+    failed_count = len(latencies) - len(valid_results)
+
+    lat_values = [r[0] for r in valid_results]
+    row_counts = [r[1] for r in valid_results]
+
     if failed_count > 0:
         log.warning("queries_failed", count=failed_count)
-    
-    qps = len(valid_latencies) / total_duration if total_duration > 0 else 0
+
+    qps = len(lat_values) / total_duration if total_duration > 0 else 0
+
+    clipped_count = sum(1 for rc in row_counts if rc < top_k)
     log.info("scenario_complete",
              duration_seconds=round(total_duration, 2),
-             successful_queries=len(valid_latencies),
-             qps=round(qps, 2))
-    
-    # Save results to PostgreSQL results database
+             successful_queries=len(lat_values),
+             qps=round(qps, 2),
+             avg_rows_returned=round(sum(row_counts) / len(row_counts), 1) if row_counts else 0,
+             min_rows_returned=min(row_counts) if row_counts else 0,
+             max_rows_returned=max(row_counts) if row_counts else 0,
+             clipped_queries=clipped_count,
+             expected_rows=top_k)
+
+    if clipped_count > 0:
+        log.warning("result_clipping_detected",
+                     clipped_queries=clipped_count,
+                     total_queries=len(row_counts),
+                     clipping_rate_pct=round(100 * clipped_count / len(row_counts), 1) if row_counts else 0)
+
+    latencies_with_nones = [r[0] if r is not None else None for r in latencies]
     pg_conn = results_db.get_results_db_connection()
     results_db.setup_results_tables(pg_conn)
     results_db.save_retrieval_metrics(
@@ -384,7 +405,7 @@ def run_benchmark_scenario(
         index_type="HNSW",
         top_k=top_k,
         concurrency=concurrency,
-        latencies=latencies,
+        latencies=latencies_with_nones,
         total_duration=total_duration
     )
     pg_conn.close()

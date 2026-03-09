@@ -28,7 +28,12 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
+
+# (latency_seconds, row_count) — returned by every execute_*_search function.
+# None signifies a failed query. row_count lets the aggregation layer verify
+# that the database actually returned the requested number of results.
+QueryResult = Optional[Tuple[float, int]]
 
 import numpy as np
 import asyncpg
@@ -180,8 +185,8 @@ async def execute_vector_search(
     pool: asyncpg.Pool,
     query_embedding: np.ndarray,
     top_k: int
-) -> Optional[float]:
-    """Execute a pure vector search and return latency in seconds."""
+) -> QueryResult:
+    """Execute a pure vector search and return (latency, row_count)."""
     try:
         async with pool.acquire(timeout=POOL_ACQUIRE_TIMEOUT) as conn:
             ef = common.compute_hnsw_ef_search(top_k)
@@ -195,9 +200,9 @@ async def execute_vector_search(
                 ORDER BY embedding <=> $1
                 LIMIT {top_k}
             """
-            await conn.fetch(query, query_embedding)
+            rows = await conn.fetch(query, query_embedding)
 
-            return time.perf_counter() - t0
+            return (time.perf_counter() - t0, len(rows))
     except Exception as e:
         logger.warning("query_failed", error=str(e) or type(e).__name__)
         return None
@@ -209,9 +214,9 @@ async def execute_filtered_search(
     filter_field: str,
     filter_value: str,
     top_k: int
-) -> Optional[float]:
+) -> QueryResult:
     """
-    Execute a filtered vector search and return latency in seconds.
+    Execute a filtered vector search and return (latency, row_count).
 
     Sets hnsw.iterative_scan before the query so pgvector expands the HNSW graph
     in batches until top_k filter-passing results are found, guaranteeing a full
@@ -224,9 +229,6 @@ async def execute_filtered_search(
         async with pool.acquire(timeout=POOL_ACQUIRE_TIMEOUT) as conn:
             ef = common.compute_hnsw_ef_search(top_k)
             await conn.execute(f"SET hnsw.ef_search = {ef}")
-            # Enable iterative graph expansion for filtered search so the planner
-            # keeps walking the HNSW graph until it has collected top_k rows that
-            # satisfy the WHERE predicate, rather than silently short-returning.
             await conn.execute(f"SET hnsw.iterative_scan = '{common.HNSW_ITERATIVE_SCAN}'")
 
             try:
@@ -239,15 +241,13 @@ async def execute_filtered_search(
                     ORDER BY embedding <=> $1
                     LIMIT {top_k}
                 """
-                await conn.fetch(query, query_embedding, filter_value)
+                rows = await conn.fetch(query, query_embedding, filter_value)
 
                 elapsed = time.perf_counter() - t0
             finally:
-                # Always reset — even if the query raised — so the connection
-                # goes back to the pool without iterative_scan still active.
                 await conn.execute("RESET hnsw.iterative_scan")
 
-            return elapsed
+            return (elapsed, len(rows))
     except Exception as e:
         logger.warning("query_failed", error=str(e) or type(e).__name__)
         return None
@@ -258,8 +258,8 @@ async def execute_hybrid_search(
     query_embedding: np.ndarray,
     keyword: str,
     top_k: int
-) -> Optional[float]:
-    """Execute a hybrid (vector + text) search and return latency in seconds."""
+) -> QueryResult:
+    """Execute a hybrid (vector + text) search and return (latency, row_count)."""
     try:
         async with pool.acquire(timeout=POOL_ACQUIRE_TIMEOUT) as conn:
             ef = common.compute_hnsw_ef_search(top_k * 2)
@@ -299,9 +299,9 @@ async def execute_hybrid_search(
                 ORDER BY rrf_score DESC
                 LIMIT {top_k}
             """
-            await conn.fetch(query, query_embedding, keyword)
+            rows = await conn.fetch(query, query_embedding, keyword)
 
-            return time.perf_counter() - t0
+            return (time.perf_counter() - t0, len(rows))
     except Exception as e:
         logger.warning("query_failed", error=str(e) or type(e).__name__)
         return None
@@ -319,7 +319,7 @@ async def run_concurrent_queries(
     concurrency: int,
     num_queries: int,
     dataset_type: str
-) -> tuple[List[float], float]:
+) -> tuple[List[QueryResult], float]:
     """
     Run queries with controlled concurrency using a semaphore.
 
@@ -336,15 +336,15 @@ async def run_concurrent_queries(
         dataset_type: 'wot' or 'aerospace'
 
     Returns:
-        Tuple of (latencies list, total duration)
+        Tuple of (query_results list, total duration).
+        Each element is either (latency, row_count) or None.
     """
     semaphore = asyncio.Semaphore(concurrency)
     filter_field = get_filter_field(dataset_type)
 
-    # Overall timeout per individual query task: acquire + execute + buffer
     task_timeout = POOL_ACQUIRE_TIMEOUT + QUERY_TIMEOUT + 10
 
-    async def bounded_query(idx: int) -> Optional[float]:
+    async def bounded_query(idx: int) -> QueryResult:
         async with semaphore:
             query = queries[idx % len(queries)]
             query_embedding = np.array(query['embedding'])
@@ -359,7 +359,7 @@ async def run_concurrent_queries(
                 return await execute_hybrid_search(pool, query_embedding, keyword, top_k)
             return None
 
-    async def safe_bounded_query(idx: int) -> Optional[float]:
+    async def safe_bounded_query(idx: int) -> QueryResult:
         """Wrap bounded_query with a hard timeout to prevent hangs."""
         try:
             return await asyncio.wait_for(bounded_query(idx), timeout=task_timeout)
@@ -370,11 +370,11 @@ async def run_concurrent_queries(
     start_time = time.perf_counter()
 
     tasks = [safe_bounded_query(i) for i in range(num_queries)]
-    latencies = await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks)
 
     total_duration = time.perf_counter() - start_time
 
-    return list(latencies), total_duration
+    return list(results), total_duration
 
 
 async def run_benchmark_scenario(
@@ -394,23 +394,42 @@ async def run_benchmark_scenario(
     log = logger.bind(test_type=test_type, top_k=top_k, concurrency=concurrency, dataset_type=dataset_type)
     log.info("starting_scenario", driver="asyncpg")
 
-    latencies, total_duration = await run_concurrent_queries(
+    query_results, total_duration = await run_concurrent_queries(
         pool, queries, test_type, top_k, concurrency, common.NUM_QUERIES, dataset_type
     )
 
-    valid_latencies = [l for l in latencies if l is not None]
-    failed_count = len(latencies) - len(valid_latencies)
+    # Separate successful results from failures
+    valid_results = [r for r in query_results if r is not None]
+    failed_count = len(query_results) - len(valid_results)
+
+    latencies = [r[0] for r in valid_results]
+    row_counts = [r[1] for r in valid_results]
 
     if failed_count > 0:
-        log.warning("queries_failed", count=failed_count, total=len(latencies))
+        log.warning("queries_failed", count=failed_count, total=len(query_results))
 
-    qps = len(valid_latencies) / total_duration if total_duration > 0 else 0
+    qps = len(latencies) / total_duration if total_duration > 0 else 0
+
+    # Row count verification — the key observability metric
+    clipped_count = sum(1 for rc in row_counts if rc < top_k)
     log.info("scenario_complete",
              duration_seconds=round(total_duration, 2),
-             successful_queries=len(valid_latencies),
-             qps=round(qps, 2))
+             successful_queries=len(latencies),
+             qps=round(qps, 2),
+             avg_rows_returned=round(sum(row_counts) / len(row_counts), 1) if row_counts else 0,
+             min_rows_returned=min(row_counts) if row_counts else 0,
+             max_rows_returned=max(row_counts) if row_counts else 0,
+             clipped_queries=clipped_count,
+             expected_rows=top_k)
 
-    # Save results to PostgreSQL results database
+    if clipped_count > 0:
+        log.warning("result_clipping_detected",
+                     clipped_queries=clipped_count,
+                     total_queries=len(row_counts),
+                     clipping_rate_pct=round(100 * clipped_count / len(row_counts), 1) if row_counts else 0)
+
+    # Save results — pass latencies with None for failed queries (backward-compatible)
+    latencies_with_nones = [r[0] if r is not None else None for r in query_results]
     pg_conn = results_db.get_results_db_connection()
     results_db.setup_results_tables(pg_conn)
     results_db.save_retrieval_metrics(
@@ -423,7 +442,7 @@ async def run_benchmark_scenario(
         index_type="HNSW",
         top_k=top_k,
         concurrency=concurrency,
-        latencies=latencies,
+        latencies=latencies_with_nones,
         total_duration=total_duration
     )
     pg_conn.close()
