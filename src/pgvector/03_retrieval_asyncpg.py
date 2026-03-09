@@ -184,6 +184,9 @@ async def execute_vector_search(
     """Execute a pure vector search and return latency in seconds."""
     try:
         async with pool.acquire(timeout=POOL_ACQUIRE_TIMEOUT) as conn:
+            ef = common.compute_hnsw_ef_search(top_k)
+            await conn.execute(f"SET hnsw.ef_search = {ef}")
+
             t0 = time.perf_counter()
 
             query = f"""
@@ -210,6 +213,9 @@ async def execute_filtered_search(
     """Execute a filtered vector search and return latency in seconds."""
     try:
         async with pool.acquire(timeout=POOL_ACQUIRE_TIMEOUT) as conn:
+            ef = common.compute_hnsw_ef_search(top_k)
+            await conn.execute(f"SET hnsw.ef_search = {ef}")
+
             t0 = time.perf_counter()
 
             query = f"""
@@ -236,6 +242,9 @@ async def execute_hybrid_search(
     """Execute a hybrid (vector + text) search and return latency in seconds."""
     try:
         async with pool.acquire(timeout=POOL_ACQUIRE_TIMEOUT) as conn:
+            ef = common.compute_hnsw_ef_search(top_k * 2)
+            await conn.execute(f"SET hnsw.ef_search = {ef}")
+
             t0 = time.perf_counter()
 
             vector_limit = top_k * 2
@@ -430,6 +439,9 @@ async def warmup_index(pool: asyncpg.Pool, queries: List[dict]):
             query_embedding = np.array(query['embedding'])
             try:
                 async with pool.acquire(timeout=POOL_ACQUIRE_TIMEOUT) as conn:
+                    ef = common.compute_hnsw_ef_search(top_k)
+                    await conn.execute(f"SET hnsw.ef_search = {ef}")
+
                     query_sql = f"""
                         SELECT id, 1 - (embedding <=> $1) AS similarity
                         FROM {common.TABLE_NAME}
@@ -464,7 +476,9 @@ async def main_async():
                 top_k_values=common.TOP_K_VALUES,
                 pool_min=common.POOL_MIN_SIZE,
                 pool_max=common.POOL_MAX_SIZE,
-                dataset_type=dataset_type)
+                dataset_type=dataset_type,
+                hnsw_ef_search_min=common.HNSW_EF_SEARCH_MIN,
+                hnsw_ef_search_formula="max(HNSW_EF_SEARCH_MIN, top_k)")
 
     # Load queries
     queries = dataset.load_test_queries(common.QUERY_FILE, limit=common.NUM_QUERIES)

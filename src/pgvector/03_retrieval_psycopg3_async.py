@@ -142,6 +142,9 @@ async def execute_vector_search(
     try:
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
+                ef = common.compute_hnsw_ef_search(top_k)
+                await cur.execute(f"SET hnsw.ef_search = {ef}")
+
                 t0 = time.perf_counter()
                 
                 await cur.execute(
@@ -176,6 +179,9 @@ async def execute_filtered_search(
     try:
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
+                ef = common.compute_hnsw_ef_search(top_k)
+                await cur.execute(f"SET hnsw.ef_search = {ef}")
+
                 t0 = time.perf_counter()
 
                 await cur.execute(
@@ -200,6 +206,9 @@ async def execute_hybrid_search(
     try:
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
+                ef = common.compute_hnsw_ef_search(top_k * 2)
+                await cur.execute(f"SET hnsw.ef_search = {ef}")
+
                 t0 = time.perf_counter()
                 
                 # Hybrid search parameters:
@@ -380,7 +389,9 @@ async def main_async():
                 concurrency_levels=common.CONCURRENCY_LEVELS,
                 top_k_values=common.TOP_K_VALUES,
                 pool_min=common.POOL_MIN_SIZE,
-                pool_max=common.POOL_MAX_SIZE)
+                pool_max=common.POOL_MAX_SIZE,
+                hnsw_ef_search_min=common.HNSW_EF_SEARCH_MIN,
+                hnsw_ef_search_formula="max(HNSW_EF_SEARCH_MIN, top_k)")
 
     # Load queries
     queries = dataset.load_test_queries(common.QUERY_FILE, limit=common.NUM_QUERIES)

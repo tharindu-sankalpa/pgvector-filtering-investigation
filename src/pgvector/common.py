@@ -74,6 +74,33 @@ QUERY_FILE = os.getenv("QUERY_FILE", "data/hybrid_test_queries.parquet")
 
 
 # =============================================================================
+# HNSW ef_search Configuration (Fair Benchmarking)
+# =============================================================================
+# pgvector defaults to hnsw.ef_search=40 which silently clips results when
+# LIMIT > ~67.  Milvus uses ef=max(64, top_k) per query, ensuring ef >= top_k.
+# To make benchmarks comparable, we mirror Milvus's approach.
+
+HNSW_EF_SEARCH_MIN = int(os.getenv("HNSW_EF_SEARCH_MIN", "64"))
+
+
+def compute_hnsw_ef_search(top_k: int) -> int:
+    """
+    Compute the HNSW ef_search value that should be SET before a pgvector query.
+
+    Mirrors the Milvus convention: ef = max(HNSW_EF_SEARCH_MIN, top_k).
+    This guarantees the HNSW candidate list is always large enough to return
+    the requested number of results without silent clipping.
+
+    Args:
+        top_k: The LIMIT / number of nearest neighbours requested.
+
+    Returns:
+        int: The ef_search value to use.
+    """
+    return max(HNSW_EF_SEARCH_MIN, top_k)
+
+
+# =============================================================================
 # Pool Configuration
 # =============================================================================
 
