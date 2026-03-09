@@ -189,6 +189,12 @@ query = f"""
 await conn.fetch(query, query_embedding)
 ```
 
+**Key syntax:**
+
+- **`embedding <=> $1`**: pgvector's cosine distance operator. Returns a value in [0, 2]: 0 means identical vectors, 2 means maximally opposite. The `<=>` operator is what signals to PostgreSQL that this is a nearest-neighbor query, triggering HNSW graph traversal instead of a full table scan.
+- **`1 - (embedding <=> $1)`**: Converts cosine distance to cosine similarity, ranging from -1 to 1 where 1.0 is identical. This is a cosmetic transformation applied in the `SELECT` — the `ORDER BY` uses the raw distance value, since flipping the sign does not change which row is nearest.
+- **`ORDER BY embedding <=> $1 LIMIT k`**: This combination is the key pattern the planner recognizes as a k-nearest-neighbor request. When an HNSW index exists on the `embedding` column, the planner can satisfy this with a graph traversal, visiting only a logarithmic fraction of the table instead of computing distance for every row.
+
 ### 2. Filtered Search (Vector + Metadata Filter)
 
 ```python
@@ -201,6 +207,11 @@ query = f"""
 """
 await conn.fetch(query, query_embedding, filter_value)
 ```
+
+**Key syntax:**
+
+- **`metadata->>'book_name'`**: The `->>` operator extracts a text value from a JSONB column. The single-arrow `->` returns a JSONB value; the double-arrow `->>` casts it to text, which is required for equality comparisons against string literals.
+- **The interaction between `WHERE` and `ORDER BY embedding <=> $1`** is precisely what creates the filtered search performance problem described in this article. The planner must choose between two strategies: use the HNSW index and discard non-matching results as a post-filter, or use the B-tree metadata index and brute-force the distance computation on the filtered subset. At low `top_k` values the HNSW path wins; above the tipping point, the brute-force path appears cheaper to the planner — incorrectly, because `cpu_operator_cost` does not reflect the true cost of 1,536-dimensional cosine distance.
 
 ### 3. Hybrid Search (Vector + Full-Text via RRF)
 
@@ -239,6 +250,20 @@ query = f"""
     LIMIT {top_k}
 """
 ```
+
+**How Reciprocal Rank Fusion works:**
+
+This query implements a standard two-stage fusion pattern. The two CTEs independently produce ranked candidate lists from different search methods; the third CTE merges them using RRF scoring.
+
+- **`to_tsvector('english', content)`**: Tokenizes the `content` column into searchable lexemes using English language stemming rules. "running" becomes "run", "searched" becomes "search". This normalization allows the index to match inflected forms.
+- **`plainto_tsquery('english', $2)`**: Converts a plain text phrase into a `tsquery` — an AND-combination of the stemmed tokens in the query string. The `plain` variant handles arbitrary user input without requiring tsquery syntax.
+- **`@@`**: The text search match operator. Returns true if the `tsvector` contains all the tokens in the `tsquery`. This is what the GIN index satisfies efficiently — it answers "which rows contain these tokens" but cannot rank them.
+- **`ts_rank(tsvector, tsquery)`**: Computes a relevance score based on term frequency and position within each document. Conceptually similar to TF-IDF. Critically, this score is not stored in the GIN index and must be recomputed by fetching and re-tokenizing every matching row, which is the root cause of the hybrid search bottleneck.
+- **`ROW_NUMBER() OVER (ORDER BY ...)`**: Assigns an integer rank (1, 2, 3, ...) to each row within its result set, ordered by either distance or text score. The actual similarity values are discarded; only the ordinal positions matter for RRF.
+- **`COALESCE(1.0 / (60 + rank), 0.0)`**: The RRF score formula from Cormack et al. (2009). The constant 60 smooths rank differences near the top of each list — a result ranked 1st contributes 1/61 ≈ 0.0164, while rank 10 contributes 1/70 ≈ 0.0143. This prevents top-ranked results from dominating the fusion score by too wide a margin while still rewarding them over lower-ranked ones.
+- **`FULL OUTER JOIN`**: Ensures every candidate from either the vector search or the text search appears in the fused result, even if it was found by only one method. A result exclusive to the vector search will have a `NULL` text rank (handled by `COALESCE(..., 0.0)`), and vice versa.
+
+The complete standalone SQL for all three patterns, with `EXPLAIN ANALYZE` wrappers and parameterized filter experiments, is available in [`scripts/perf_audit_pgvector_2.5m_wot.sql`](scripts/perf_audit_pgvector_2.5m_wot.sql).
 
 The benchmark driver uses Python's `asyncpg` with connection pooling and semaphore-based concurrency control. Each test scenario runs 4,373 queries using real embeddings sampled from the dataset.
 
@@ -408,17 +433,69 @@ The planner chose this path because it priced each vector distance computation a
 
 ### GIN Index and Full-Text Search
 
-A GIN (Generalized Inverted Index) is PostgreSQL's index for full-text search. The expression index `CREATE INDEX ON table USING gin (to_tsvector('english', content))` tokenizes the `content` column and builds an inverted index mapping each word (lexeme) to the list of rows containing it.
+The expression index `CREATE INDEX ON wot_chunks_2_5m USING gin (to_tsvector('english', content))` builds a GIN (Generalized Inverted Index) for full-text search. To understand why this index has a fundamental limitation at query time, it helps to see exactly how it is built — and what it does and does not store.
 
-The GIN index is extremely fast at answering the question "which rows contain this word?" using the `@@` operator. But it **cannot** answer "which rows contain this word, ranked by relevance, give me the top 20?" To rank results by `ts_rank()`, PostgreSQL must:
+<p align="center">
+  <img src="doc/diagrams/gin-index.png" alt="GIN Index" />
+</p>
 
-1. Use the GIN index to find all matching row IDs
-2. Fetch every matching row from the heap (the actual table data)
-3. Compute `ts_rank()` on each row (which involves re-tokenizing the content)
-4. Sort all rows by rank
+**Step 1: Tokenization at index build time**
+
+When the index is built, PostgreSQL runs `to_tsvector('english', content)` on every row. As the diagram shows, this does two things to the raw text. First, it strips common words like "the", "of", "on" — called stopwords — because they carry no search value. Second, it reduces remaining words to their root form through stemming: "blazing" becomes `blaze`, "unfurled" becomes `unfurl`, "dragons" becomes `dragon`. The result is a compact set of tokens called lexemes.
+
+So a chunk like:
+
+> _"Rand drew on the One Power, the dragon symbol blazing..."_
+
+becomes: `rand · draw · power · dragon · symbol · blaze`
+
+And another chunk like:
+
+> _"Moiraine spoke of the dragon reborn, the prophecies said..."_
+
+becomes: `moirain · spoke · dragon · reborn · prophecy`
+
+Notice that "dragon" appears as the same lexeme in both rows, even though the original text used different forms of the word. This is how a search for "dragons" matches all of them.
+
+**Step 2: Building the inverted index**
+
+Once every row is tokenised, the GIN index flips the relationship. Instead of storing "row → list of words", it builds the opposite mapping: "word → list of rows." As the diagram shows, the result is a sorted table of lexemes, and next to each lexeme sits a posting list — the full list of row IDs that contain that word:
+
+| Lexeme   | Posting List                                             |
+| -------- | -------------------------------------------------------- |
+| `banner` | 4022, 7103, 12881, 34201, ...                            |
+| `blaze`  | 4021, 891, 23445, 56012, ...                             |
+| `dragon` | 4021, 4022, 9901, 312, 788, ... _(76,198 row IDs total)_ |
+| `reborn` | 9901, 14523, 29834, 56712, ...                           |
+
+This is what "inverted" means — the index is keyed by word, not by row. The lexemes are stored in sorted alphabetical order, so looking up any word is an O(log n) binary search into this list.
+
+**What the GIN index can and cannot do**
+
+When a query arrives with `WHERE to_tsvector('english', content) @@ plainto_tsquery('english', 'dragon')`, PostgreSQL jumps directly to the `dragon` entry and retrieves its posting list of 76,198 row IDs in milliseconds. As the bottom-left of the diagram notes, this is what GIN does instantly and accurately.
+
+The problem is ranking. The posting list stores only _which_ rows contain the word — not _how often_ or _how prominently_ it appears in each row. But `ts_rank()` needs exactly that frequency information to score relevance. Since the GIN index simply does not store it, PostgreSQL has no choice but to:
+
+1. Use the GIN index to get all 76,198 row IDs matching `'dragon'`
+2. Fetch every one of those 76,198 rows from disk
+3. Re-tokenise the `content` column of each row at query time to compute `ts_rank()`
+4. Sort all 76,198 scored rows by rank
 5. Return the top N
 
-For a common keyword like "dragon" that appears in 76,198 rows out of 2.5 million, this means fetching and scoring 76,198 rows just to return the top 20. This architectural limitation becomes the dominant bottleneck in hybrid search, as we will see later in this article.
+As the bottom-right of the diagram states: `ts_rank()` depends on term frequency within each document — information not stored in the GIN index. This forces the "fetch all, score all, sort all" pattern that makes the full-text component of hybrid search 3 to 4x slower than pure vector search, as we will see in the hybrid search investigation later.
+
+### Putting It All Together: The Index Footprint
+
+To verify the indexing strategy and understand the disk footprint of each index, querying the `pg_indexes` and `pg_class` system catalogs provides a clear breakdown of the indexes created on our `wot_chunks_2_5m` table. As seen in the output below, there are four distinct indexes, each serving a specific query pattern we discussed above:
+
+<p align="center">
+  <img src="doc/screenshots/dbeaver/indexes.png" alt="Database Indexes Breakdown" />
+</p>
+
+1. **`wot_chunks_2_5m_embedding_idx` (HNSW Index)**: This is pgvector's Hierarchical Navigable Small World index used for approximate nearest neighbor (ANN) search on the vector embeddings. It is by far the largest index (~19 GB) because it stores a complex, multi-layered graph structure (`m=16`, `ef_construction=64`) to enable rapid vector similarity searches using cosine distance (`vector_cosine_ops`).
+2. **`wot_chunks_2_5m_to_tsvector_idx` (GIN Index)**: The Generalized Inverted Index (GIN) is used for full-text search. It maps tokenised English words (lexemes) to the rows that contain them, allowing rapid keyword matching against the text `content` during hybrid search (~193 MB).
+3. **`wot_chunks_2_5m_pkey` (B-Tree Index)**: The standard default PostgreSQL index built automatically for the primary key (`id`). It guarantees row uniqueness and enables fast exact-match lookups (~54 MB).
+4. **`wot_chunks_2_5m_expr_idx` (B-Tree Expression Index)**: This index accelerates metadata filtering. Instead of querying the raw JSONB column directly, it creates a B-tree over the extracted text values of `metadata->>'book_name'`, allowing PostgreSQL to instantly find chunks originating from a specific book (~17 MB).
 
 ### The Query Planner and Cost Model
 
@@ -499,7 +576,13 @@ _Charts: see `doc/plots/article_filtered_search_cliff.png` for the visual repres
 
 ## The Investigation: EXPLAIN ANALYZE Reveals the Truth
 
-To understand what was happening, I wrote a diagnostic script that runs the exact filtered search query at different `top_k` values using PostgreSQL's `EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)`. This shows the actual execution plan the query planner chose and the real runtime statistics.
+To understand what was happening, I wrote a diagnostic script that runs the exact filtered search query at different `top_k` values using PostgreSQL's `EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)`. This shows the actual execution plan the query planner chose and the real runtime statistics. The complete set of diagnostic queries is available in [`scripts/perf_audit_pgvector_2.5m_wot.sql`](scripts/perf_audit_pgvector_2.5m_wot.sql).
+
+As a baseline, the screenshot below shows the `EXPLAIN ANALYZE` output for a **pure vector search** (no metadata filter) at `LIMIT 100`. The planner chooses the HNSW index unconditionally — `Index Scan using wot_chunks_2_5m_embedding_idx`. The high execution time (15,293 ms) reflects a cold buffer cache: 4,502 pages were read from disk. On a warm cache the same query runs in the low single-digit milliseconds, consistent with the benchmark numbers in the table above.
+
+<p align="center">
+  <img src="doc/screenshots/dbeaver/explain-pure-vector-hnsw-cold-cache.png" alt="EXPLAIN ANALYZE: pure vector search, HNSW index scan, cold cache 15 seconds" />
+</p>
 
 ```python
 # Diagnostic query: same as the benchmark, wrapped in EXPLAIN ANALYZE
@@ -532,6 +615,12 @@ Execution Time: 83.308 ms
 **What is happening here**: PostgreSQL is using the **HNSW vector index** (`wot_chunks_2_5m_embedding_idx`). It traverses the HNSW graph to find the nearest neighbors by vector distance, then applies the `book_name` filter as a post-filter, discarding non-matching rows. It found 8 matching rows after scanning 67 candidates (8 kept + 59 filtered out). Total: **83 ms**.
 
 This is the efficient path. The HNSW index does the heavy lifting, traversing a graph structure that can find approximate nearest neighbors in logarithmic time, and the metadata filter just removes a few non-matching results.
+
+The DBeaver screenshot below shows this plan in action. The query targets `'13. Towers of Midnight'` at `LIMIT 37` — just below its tipping point. The HNSW index is chosen, but notice that only **6 rows** are returned despite `LIMIT 37`. This is the index-level recall problem: with `ef_search = 40` (the default), the index explored 6 + 95 = 101 candidates and found only 6 that passed the `book_name` filter. The planner is still making the right decision to use HNSW here, but the shallow candidate pool means results are incomplete — a separate problem from the catastrophic plan switch, and the problem that iterative scan was designed to solve.
+
+<p align="center">
+  <img src="doc/screenshots/dbeaver/explain-filtered-hnsw-active-limit-37-low-recall.png" alt="EXPLAIN ANALYZE: HNSW index active at LIMIT 37, low recall due to ef_search exhaustion" />
+</p>
 
 ### The Catastrophic Path: top_k = 50
 
@@ -576,6 +665,12 @@ flowchart TD
 
 Step 3 is the killer. Computing cosine distance on 1,536-dimensional vectors for 63,945 rows is pure CPU torture. That is where the 215 seconds went.
 
+The screenshot below shows the same tipping-point switch captured in DBeaver for `'13. Towers of Midnight'` at `LIMIT 38` — one unit above its tipping point. The plan is identical in structure: Bitmap Index Scan collecting 168,426 row IDs in ~30 ms, Bitmap Heap Scan fetching all of them from disk, followed by a top-N heapsort computing brute-force cosine distance on every one. Execution time: **108,398 ms (~108 seconds)**. The only difference from the `'00. New Spring'` example above is that this book has more matching rows (168,426 vs 63,945), which makes the brute-force sort correspondingly more expensive.
+
+<p align="center">
+  <img src="doc/screenshots/dbeaver/explain-filtered-bitmap-scan-tipping-point-limit-38.png" alt="EXPLAIN ANALYZE: plan switches to Bitmap Heap Scan + brute-force sort at LIMIT 38 (108 seconds)" />
+</p>
+
 ---
 
 ## Why Does the Query Planner Switch?
@@ -614,7 +709,23 @@ I tested the planner's decision at fine-grained `top_k` values to find the exact
 | 00. New Spring (smallest)   | 63,945        | 2.6%       | top_k = 40      | top_k = 45  |
 | 06. Lord of Chaos (largest) | 209,226       | 8.4%       | top_k = 40      | top_k = 42  |
 
-The threshold is remarkably consistent at around **top_k = 40 to 42** regardless of filter selectivity for this dataset. For your data, it will depend on:
+The threshold is remarkably consistent at around **top_k = 40 to 42** regardless of filter selectivity for this dataset. The DBeaver screenshots below confirm this with two additional filter configurations captured during the investigation.
+
+The first shows the high-selectivity case — filtering on `'06. Lord of Chaos'`, the largest book with ~209,226 matching rows (8.4% of the table). The bitmap plan fetches all 209,226 rows and computes brute-force distance on every one. Execution time: **479,739 ms (~480 seconds)** — more than twice as long as the `'00. New Spring'` case because the matching row count is more than three times larger.
+
+<p align="center">
+  <img src="doc/screenshots/dbeaver/explain-filtered-high-selectivity-bitmap-480s.png" alt="EXPLAIN ANALYZE: high-selectivity filter, 209,226 rows, bitmap scan takes 480 seconds" />
+</p>
+
+The second screenshot shows a compound filter — `book_name AND chapter_number` — targeting a single chapter within a book. The B-tree index on `metadata->>'book_name'` narrows candidates to the book's 63,945 rows, then the chapter condition is applied as a `Recheck Cond` during the Bitmap Heap Scan, reducing the set further before distance computation. The same brute-force plan is used, but because far fewer rows survive both filter conditions, the distance computation step processes a much smaller set. Execution time: **~1,960 ms** — still brute-force, but dramatically faster than the single-filter cases because the effective candidate count after both filters is a small fraction of the book-level total.
+
+<p align="center">
+  <img src="doc/screenshots/dbeaver/explain-filtered-compound-filter-bitmap-2s.png" alt="EXPLAIN ANALYZE: compound filter (book + chapter), bitmap scan completes in ~2 seconds" />
+</p>
+
+This compound-filter result illustrates an important nuance: the catastrophic performance is not an intrinsic property of the bitmap plan — it is a function of **how many rows survive the filter and require distance computation**. A compound filter that narrows the dataset to a few hundred rows will run in milliseconds even with the brute-force path. The danger zone is single-field filters on large, unevenly distributed metadata values where tens of thousands of rows match.
+
+For your data, the tipping point will depend on:
 
 - Total number of rows
 - Number of rows matching the filter
