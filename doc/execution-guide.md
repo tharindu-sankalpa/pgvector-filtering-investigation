@@ -47,21 +47,19 @@ docker push $ACR_NAME.azurecr.io/$IMAGE_NAME:$TAG
 
 The benchmarks use the **Wheel of Time (WoT)** dataset: 1536-dimensional OpenAI embeddings of text chunks from 16 books. Two scales are tested:
 
-| Dataset | Records | File | Size |
-|---------|---------|------|------|
-| 100K (base) | 100,105 | `wot_chunks_with_embeddings_100pct.parquet` | ~872 MB |
-| 2.5M (synthetic) | 2,500,000 | `gen_wot_2.5m.parquet` | ~22 GB |
-| Queries | 1,000 | `wot_retrieval_queries.parquet` | ~39 MB |
+| Dataset          | Records   | File                                        | Size    |
+| ---------------- | --------- | ------------------------------------------- | ------- |
+| 100K (base)      | 100,105   | `wot_chunks_with_embeddings_100pct.parquet` | ~872 MB |
+| 2.5M (synthetic) | 2,500,000 | `gen_wot_2.5m.parquet`                      | ~22 GB  |
+| Queries          | 1,000     | `wot_retrieval_queries.parquet`             | ~39 MB  |
 
 ### Download Links
 
-> **Note:** Replace the placeholder URLs below with your actual Google Drive share links.
-
-| File | Download |
-|------|----------|
-| `wot_chunks_with_embeddings_100pct.parquet` | [Google Drive](https://drive.google.com/YOUR_LINK_HERE) |
-| `wot_retrieval_queries.parquet` | [Google Drive](https://drive.google.com/YOUR_LINK_HERE) |
-| `gen_wot_2.5m.parquet` (optional) | [Google Drive](https://drive.google.com/YOUR_LINK_HERE) |
+| File                                        | Download                                                                                                         |
+| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `wot_chunks_with_embeddings_100pct.parquet` | [Google Cloud Storage](https://storage.googleapis.com/fantasy-rag-lab/wot_chunks_with_embeddings_100pct.parquet) |
+| `wot_retrieval_queries.parquet`             | [Google Cloud Storage](https://storage.googleapis.com/fantasy-rag-lab/wot_retrieval_queries.parquet)             |
+| `gen_wot_2.5m.parquet` (optional)           | [Google Cloud Storage](https://storage.googleapis.com/fantasy-rag-lab/gen_wot_2.5m.parquet)                      |
 
 The dataset config file (`data/wot_dataset.yaml`) describes column mappings used by the benchmark scripts:
 
@@ -359,6 +357,7 @@ export NAMESPACE="default"
 ### CNPG pgvector - WoT 100K Vectors
 
 **Prerequisites:**
+
 - CNPG cluster running with LoadBalancer exposed (see [CNPG_PGVECTOR_SETUP.md](./CNPG_PGVECTOR_SETUP.md))
 - `cnpg-pgvector-secrets` created on `benchmark-execution-aks` with `PG_HOST` (LoadBalancer IP) and `PG_PASSWORD`
 - `pg-results-secrets` exists for results database
@@ -366,6 +365,7 @@ export NAMESPACE="default"
 > **Architecture:** CNPG runs on a dedicated AKS cluster (`aks-cnpg-pgvector`, Standard_D16s_v3 16vCPU/64GB). Benchmark jobs connect via the LoadBalancer external IP over TLS.
 
 **Insert**
+
 ```bash
 helm uninstall cnpg-pg-insert-wot -n $NAMESPACE --ignore-not-found && \
 helm install cnpg-pg-insert-wot ./kube/charts/benchmark-engine \
@@ -376,6 +376,7 @@ helm install cnpg-pg-insert-wot ./kube/charts/benchmark-engine \
 ```
 
 **Index Creation**
+
 ```bash
 helm uninstall cnpg-pg-index-wot -n $NAMESPACE --ignore-not-found && \
 helm install cnpg-pg-index-wot ./kube/charts/benchmark-engine \
@@ -386,6 +387,7 @@ helm install cnpg-pg-index-wot ./kube/charts/benchmark-engine \
 ```
 
 **Retrieval Benchmark (asyncpg)**
+
 ```bash
 helm uninstall cnpg-pg-retrieval-asyncpg-wot -n $NAMESPACE --ignore-not-found && \
 helm install cnpg-pg-retrieval-asyncpg-wot ./kube/charts/benchmark-engine \
@@ -398,6 +400,7 @@ helm install cnpg-pg-retrieval-asyncpg-wot ./kube/charts/benchmark-engine \
 ### CNPG pgvector - WoT 2.5M Vectors
 
 **Prerequisites:**
+
 - 100K benchmark completed first (to validate connectivity)
 - `cnpg-pgvector-secrets` and `pg-results-secrets` exist on `benchmark-execution-aks`
 - 2.5M dataset generated and uploaded to Azure Files (see Section 4)
@@ -405,6 +408,7 @@ helm install cnpg-pg-retrieval-asyncpg-wot ./kube/charts/benchmark-engine \
 > Uses chunked loading (`INSERT_CHUNK_SIZE: "100000"`) to stream data from disk in 100K-row chunks, keeping memory under 8GB.
 
 **Insert (COPY Binary -- recommended for 2.5M)**
+
 ```bash
 helm uninstall cnpg-pg-insert-copy-wot-2m5 -n $NAMESPACE --ignore-not-found && \
 helm install cnpg-pg-insert-copy-wot-2m5 ./kube/charts/benchmark-engine \
@@ -415,6 +419,7 @@ helm install cnpg-pg-insert-copy-wot-2m5 ./kube/charts/benchmark-engine \
 ```
 
 **Insert (Standard INSERT -- slower, for fair cross-DB comparison)**
+
 ```bash
 helm uninstall cnpg-pg-insert-wot-2m5 -n $NAMESPACE --ignore-not-found && \
 helm install cnpg-pg-insert-wot-2m5 ./kube/charts/benchmark-engine \
@@ -425,6 +430,7 @@ helm install cnpg-pg-insert-wot-2m5 ./kube/charts/benchmark-engine \
 ```
 
 **Index Creation**
+
 ```bash
 helm uninstall cnpg-pg-index-wot-2m5 -n $NAMESPACE --ignore-not-found && \
 helm install cnpg-pg-index-wot-2m5 ./kube/charts/benchmark-engine \
@@ -435,6 +441,7 @@ helm install cnpg-pg-index-wot-2m5 ./kube/charts/benchmark-engine \
 ```
 
 **Retrieval Benchmark (asyncpg)**
+
 ```bash
 helm uninstall cnpg-pg-retrieval-asyncpg-wot-2m5 -n $NAMESPACE --ignore-not-found && \
 helm install cnpg-pg-retrieval-asyncpg-wot-2m5 ./kube/charts/benchmark-engine \
@@ -470,6 +477,7 @@ PGSSLMODE=require PGDATABASE=benchmark_results psql
 ```
 
 **Retrieval results:**
+
 ```sql
 SELECT database_name, test_type, top_k, concurrency_level,
        ROUND(avg_latency_seconds::numeric * 1000, 2) as avg_latency_ms,
@@ -482,6 +490,7 @@ LIMIT 20;
 ```
 
 **Insert results:**
+
 ```sql
 SELECT database_name, dataset_size, total_records,
        ROUND(total_time_seconds::numeric, 2) as total_time_s,
@@ -492,6 +501,7 @@ ORDER BY id DESC;
 ```
 
 **Index creation results:**
+
 ```sql
 SELECT database_name, index_type, index_parameters,
        table_row_count,
@@ -517,21 +527,21 @@ This produces charts in `doc/plots/` showing QPS and latency across all search s
 
 ## Quick Reference: CNPG Benchmark Files
 
-| Action | Values File | Notes |
-|--------|-------------|-------|
-| Insert (standard) | `examples/insert-cnpg-pgvector.yaml` | Row-by-row INSERT |
-| Insert (COPY binary) | `examples/insert-cnpg-pgvector-copy.yaml` | 10-50x faster, recommended for 2.5M |
-| Index creation | `examples/index-cnpg-pgvector.yaml` | HNSW + B-tree + GIN indexes |
-| Retrieval (asyncpg) | `examples/retrieval-cnpg-pgvector-asyncpg.yaml` | Vector, Filtered, Hybrid search |
+| Action               | Values File                                     | Notes                               |
+| -------------------- | ----------------------------------------------- | ----------------------------------- |
+| Insert (standard)    | `examples/insert-cnpg-pgvector.yaml`            | Row-by-row INSERT                   |
+| Insert (COPY binary) | `examples/insert-cnpg-pgvector-copy.yaml`       | 10-50x faster, recommended for 2.5M |
+| Index creation       | `examples/index-cnpg-pgvector.yaml`             | HNSW + B-tree + GIN indexes         |
+| Retrieval (asyncpg)  | `examples/retrieval-cnpg-pgvector-asyncpg.yaml` | Vector, Filtered, Hybrid search     |
 
 ---
 
 ## Troubleshooting
 
-| Issue | Symptom | Fix |
-|:------|:--------|:----|
-| **DB Connection Timeout** | Logs show `Connection timed out` | Check Azure PostgreSQL Firewall rules. Whitelist the AKS outbound IP (see Section 5). |
-| **OOMKilled** | Pod status is `OOMKilled` | Increase memory limits in the example YAML file (e.g., `memory: 8Gi`). |
-| **Image Pull Error** | `ErrImagePull` or `ImagePullBackOff` | Verify `ACR_NAME` variable. Ensure `acr-secret` exists and the service account is patched. |
-| **Results Not Saved** | Benchmark runs but no results appear | Check `RESULTS_PG_DATABASE` is set. Verify `pg-results-secrets` contains valid credentials. |
-| **Query File Not Found** | `FileNotFoundError` for parquet | Ensure file is uploaded to Azure Files and PVC is mounted correctly. |
+| Issue                     | Symptom                              | Fix                                                                                         |
+| :------------------------ | :----------------------------------- | :------------------------------------------------------------------------------------------ |
+| **DB Connection Timeout** | Logs show `Connection timed out`     | Check Azure PostgreSQL Firewall rules. Whitelist the AKS outbound IP (see Section 5).       |
+| **OOMKilled**             | Pod status is `OOMKilled`            | Increase memory limits in the example YAML file (e.g., `memory: 8Gi`).                      |
+| **Image Pull Error**      | `ErrImagePull` or `ImagePullBackOff` | Verify `ACR_NAME` variable. Ensure `acr-secret` exists and the service account is patched.  |
+| **Results Not Saved**     | Benchmark runs but no results appear | Check `RESULTS_PG_DATABASE` is set. Verify `pg-results-secrets` contains valid credentials. |
+| **Query File Not Found**  | `FileNotFoundError` for parquet      | Ensure file is uploaded to Azure Files and PVC is mounted correctly.                        |

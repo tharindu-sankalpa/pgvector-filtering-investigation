@@ -1,0 +1,177 @@
+book_name,top_k,uses_hnsw,latency_ms,plan_type
+00. New Spring,1,True,25.336,HNSW
+00. New Spring,5,True,8.1,HNSW
+00. New Spring,10,True,7.347,HNSW
+00. New Spring,15,True,9.327,HNSW
+00. New Spring,20,True,8.189,HNSW
+00. New Spring,25,True,7.608,HNSW
+00. New Spring,30,True,7.472,HNSW
+00. New Spring,31,True,7.601,HNSW
+00. New Spring,32,True,8.326,HNSW
+00. New Spring,33,False,2094.054,Bitmap
+00. New Spring,34,False,1035.154,Bitmap
+08. The Path of Daggers,1,True,7.16,HNSW
+08. The Path of Daggers,5,True,8.007,HNSW
+08. The Path of Daggers,10,True,7.316,HNSW
+08. The Path of Daggers,15,True,7.29,HNSW
+08. The Path of Daggers,20,True,7.774,HNSW
+08. The Path of Daggers,25,True,7.851,HNSW
+08. The Path of Daggers,30,True,12.847,HNSW
+08. The Path of Daggers,31,True,7.464,HNSW
+08. The Path of Daggers,32,True,7.613,HNSW
+08. The Path of Daggers,33,False,3513.138,Bitmap
+08. The Path of Daggers,34,False,1895.67,Bitmap
+09. Winter_s Heart,1,True,7.83,HNSW
+09. Winter_s Heart,5,True,7.493,HNSW
+09. Winter_s Heart,10,True,7.568,HNSW
+09. Winter_s Heart,15,True,8.112,HNSW
+09. Winter_s Heart,20,True,8.423,HNSW
+09. Winter_s Heart,25,True,7.631,HNSW
+09. Winter_s Heart,30,True,7.19,HNSW
+09. Winter_s Heart,31,True,7.485,HNSW
+09. Winter_s Heart,32,True,7.646,HNSW
+09. Winter_s Heart,33,False,3672.825,Bitmap
+09. Winter_s Heart,34,False,1987.818,Bitmap
+03. The Dragon Reborn,1,True,7.446,HNSW
+03. The Dragon Reborn,5,True,7.433,HNSW
+03. The Dragon Reborn,10,True,8.063,HNSW
+03. The Dragon Reborn,15,True,7.821,HNSW
+03. The Dragon Reborn,20,True,7.755,HNSW
+03. The Dragon Reborn,25,True,9.011,HNSW
+03. The Dragon Reborn,30,True,8.452,HNSW
+03. The Dragon Reborn,31,True,8.55,HNSW
+03. The Dragon Reborn,32,True,7.723,HNSW
+03. The Dragon Reborn,33,False,3831.119,Bitmap
+03. The Dragon Reborn,34,False,2218.377,Bitmap
+02. The Great Hunt,1,True,10.009,HNSW
+02. The Great Hunt,5,True,11.241,HNSW
+02. The Great Hunt,10,True,7.192,HNSW
+02. The Great Hunt,15,True,7.657,HNSW
+02. The Great Hunt,20,True,7.479,HNSW
+02. The Great Hunt,25,True,8.765,HNSW
+02. The Great Hunt,30,True,8.418,HNSW
+02. The Great Hunt,31,True,8.045,HNSW
+02. The Great Hunt,32,True,7.957,HNSW
+02. The Great Hunt,33,False,4054.093,Bitmap
+02. The Great Hunt,34,False,2277.055,Bitmap
+10. Crossroads of Twilight,1,True,7.168,HNSW
+10. Crossroads of Twilight,5,True,7.622,HNSW
+10. Crossroads of Twilight,10,True,7.881,HNSW
+10. Crossroads of Twilight,15,True,7.342,HNSW
+10. Crossroads of Twilight,20,True,9.516,HNSW
+10. Crossroads of Twilight,25,True,7.831,HNSW
+10. Crossroads of Twilight,30,True,10.5,HNSW
+10. Crossroads of Twilight,31,True,7.718,HNSW
+10. Crossroads of Twilight,32,True,8.757,HNSW
+10. Crossroads of Twilight,33,False,4118.172,Bitmap
+10. Crossroads of Twilight,34,False,2323.944,Bitmap
+07. A Crown of Swords,1,True,7.495,HNSW
+07. A Crown of Swords,5,True,8.001,HNSW
+07. A Crown of Swords,10,True,7.336,HNSW
+07. A Crown of Swords,15,True,8.527,HNSW
+07. A Crown of Swords,20,True,7.634,HNSW
+07. A Crown of Swords,25,True,11.046,HNSW
+07. A Crown of Swords,30,True,7.69,HNSW
+07. A Crown of Swords,31,True,7.586,HNSW
+07. A Crown of Swords,32,True,7.117,HNSW
+07. A Crown of Swords,33,False,4220.907,Bitmap
+07. A Crown of Swords,34,False,2599.421,Bitmap
+12. The Gathering Storm,1,True,6.439,HNSW
+12. The Gathering Storm,5,True,7.017,HNSW
+12. The Gathering Storm,10,True,7.548,HNSW
+12. The Gathering Storm,15,True,7.736,HNSW
+12. The Gathering Storm,20,True,8.082,HNSW
+12. The Gathering Storm,25,True,8.017,HNSW
+12. The Gathering Storm,30,True,7.692,HNSW
+12. The Gathering Storm,31,True,7.875,HNSW
+12. The Gathering Storm,32,True,7.658,HNSW
+12. The Gathering Storm,33,False,4615.679,Bitmap
+12. The Gathering Storm,34,False,2717.858,Bitmap
+01. The Eye of the World,1,True,7.249,HNSW
+01. The Eye of the World,5,True,7.366,HNSW
+01. The Eye of the World,10,True,9.788,HNSW
+01. The Eye of the World,15,True,7.178,HNSW
+01. The Eye of the World,20,True,7.866,HNSW
+01. The Eye of the World,25,True,7.715,HNSW
+01. The Eye of the World,30,True,7.393,HNSW
+01. The Eye of the World,31,True,8.214,HNSW
+01. The Eye of the World,32,True,7.584,HNSW
+01. The Eye of the World,33,False,4269.871,Bitmap
+01. The Eye of the World,34,False,2723.647,Bitmap
+11. Knife of Dreams,1,True,7.62,HNSW
+11. Knife of Dreams,5,True,7.123,HNSW
+11. Knife of Dreams,10,True,7.393,HNSW
+11. Knife of Dreams,15,True,7.31,HNSW
+11. Knife of Dreams,20,True,7.578,HNSW
+11. Knife of Dreams,25,True,8.539,HNSW
+11. Knife of Dreams,30,True,7.5,HNSW
+11. Knife of Dreams,31,True,8.182,HNSW
+11. Knife of Dreams,32,True,7.533,HNSW
+11. Knife of Dreams,33,False,4566.789,Bitmap
+11. Knife of Dreams,34,False,2861.846,Bitmap
+13. Towers of Midnight,1,True,6.925,HNSW
+13. Towers of Midnight,5,True,7.508,HNSW
+13. Towers of Midnight,10,True,7.56,HNSW
+13. Towers of Midnight,15,True,7.633,HNSW
+13. Towers of Midnight,20,True,8.049,HNSW
+13. Towers of Midnight,25,True,8.805,HNSW
+13. Towers of Midnight,30,True,7.336,HNSW
+13. Towers of Midnight,31,True,7.045,HNSW
+13. Towers of Midnight,32,True,7.405,HNSW
+13. Towers of Midnight,33,False,4624.904,Bitmap
+13. Towers of Midnight,34,False,2693.775,Bitmap
+14. A Memory of Light,1,True,7.046,HNSW
+14. A Memory of Light,5,True,7.377,HNSW
+14. A Memory of Light,10,True,7.244,HNSW
+14. A Memory of Light,15,True,7.751,HNSW
+14. A Memory of Light,20,True,7.934,HNSW
+14. A Memory of Light,25,True,8.024,HNSW
+14. A Memory of Light,30,True,7.829,HNSW
+14. A Memory of Light,31,True,8.864,HNSW
+14. A Memory of Light,32,True,8.04,HNSW
+14. A Memory of Light,33,False,4802.909,Bitmap
+14. A Memory of Light,34,False,2965.38,Bitmap
+05. The Fires of Heaven,1,True,7.3,HNSW
+05. The Fires of Heaven,5,True,7.879,HNSW
+05. The Fires of Heaven,10,True,7.498,HNSW
+05. The Fires of Heaven,15,True,7.549,HNSW
+05. The Fires of Heaven,20,True,8.476,HNSW
+05. The Fires of Heaven,25,True,7.937,HNSW
+05. The Fires of Heaven,30,True,8.748,HNSW
+05. The Fires of Heaven,31,True,8.286,HNSW
+05. The Fires of Heaven,32,True,7.58,HNSW
+05. The Fires of Heaven,33,False,4843.359,Bitmap
+05. The Fires of Heaven,34,False,3047.039,Bitmap
+04. The Shadow Rising,1,True,7.523,HNSW
+04. The Shadow Rising,5,True,7.909,HNSW
+04. The Shadow Rising,10,True,7.951,HNSW
+04. The Shadow Rising,15,True,7.333,HNSW
+04. The Shadow Rising,20,True,8.199,HNSW
+04. The Shadow Rising,25,True,7.674,HNSW
+04. The Shadow Rising,30,True,7.704,HNSW
+04. The Shadow Rising,31,True,8.092,HNSW
+04. The Shadow Rising,32,True,7.312,HNSW
+04. The Shadow Rising,33,False,5475.736,Bitmap
+04. The Shadow Rising,34,False,3366.383,Bitmap
+"The Wheel of Time Companion _ The People, Places and History of the Bestselling Series",1,True,7.501,HNSW
+"The Wheel of Time Companion _ The People, Places and History of the Bestselling Series",5,True,7.227,HNSW
+"The Wheel of Time Companion _ The People, Places and History of the Bestselling Series",10,True,7.957,HNSW
+"The Wheel of Time Companion _ The People, Places and History of the Bestselling Series",15,True,10.273,HNSW
+"The Wheel of Time Companion _ The People, Places and History of the Bestselling Series",20,True,8.189,HNSW
+"The Wheel of Time Companion _ The People, Places and History of the Bestselling Series",25,True,10.829,HNSW
+"The Wheel of Time Companion _ The People, Places and History of the Bestselling Series",30,True,8.128,HNSW
+"The Wheel of Time Companion _ The People, Places and History of the Bestselling Series",31,True,8.063,HNSW
+"The Wheel of Time Companion _ The People, Places and History of the Bestselling Series",32,True,7.837,HNSW
+"The Wheel of Time Companion _ The People, Places and History of the Bestselling Series",33,False,5524.498,Bitmap
+"The Wheel of Time Companion _ The People, Places and History of the Bestselling Series",34,False,3387.697,Bitmap
+06. Lord of Chaos,1,True,7.453,HNSW
+06. Lord of Chaos,5,True,7.229,HNSW
+06. Lord of Chaos,10,True,7.847,HNSW
+06. Lord of Chaos,15,True,8.096,HNSW
+06. Lord of Chaos,20,True,8.012,HNSW
+06. Lord of Chaos,25,True,7.524,HNSW
+06. Lord of Chaos,30,True,7.818,HNSW
+06. Lord of Chaos,31,True,8.439,HNSW
+06. Lord of Chaos,32,True,8.049,HNSW
+06. Lord of Chaos,33,False,5598.755,Bitmap
+06. Lord of Chaos,34,False,3718.146,Bitmap
