@@ -389,7 +389,7 @@ To recap the two problems stacked on top of each other:
 
 ### B-Tree Index and Bitmap Heap Scan
 
-When a filtered vector search query combines a `WHERE` clause with `ORDER BY embedding <=> $1 LIMIT N`, the query planner may abandon the HNSW index at higher `top_k` values and switch to an alternative plan built around two things working together: a B-tree index to find matching rows, and a Bitmap Heap Scan to fetch them from disk. The exact tipping point depends on filter selectivity, dataset size, and planner cost parameters — in our benchmark, this switch happened at around `top_k = 42` for filters matching 2.6% to 8.4% of the table. To understand why this alternative plan leads to catastrophic performance, it helps to walk through each step using the actual data.
+When a filtered vector search query combines a `WHERE` clause with `ORDER BY embedding <=> $1 LIMIT N`, the query planner may abandon the HNSW index at higher `top_k` values and switch to an alternative plan built around two things working together: a B-tree index to find matching rows, and a Bitmap Heap Scan to fetch them from disk. In our benchmark, this switch happened at exactly `top_k = 41` with the default `hnsw.ef_search = 40` — and it happened at the same threshold for every single filter in our dataset, regardless of how many rows matched (2.6% to 8.4% of the table). To understand why this alternative plan leads to catastrophic performance, it helps to walk through each step using the actual data.
 
 The diagram below shows the complete three-phase plan that PostgreSQL executes when it abandons the HNSW index. Follow it top to bottom as we walk through each phase.
 
@@ -537,27 +537,17 @@ Pure vector search worked well across all `top_k` values. But two other search p
 
 ### Benchmark Results: pgvector CNPG (2.5M Vectors)
 
-| Search Type         | top_k   | Concurrency | Avg Latency (ms) | P99 Latency (ms) | QPS       |
-| ------------------- | ------- | ----------- | ---------------- | ---------------- | --------- |
-| **Vector Search**   | 10      | 1           | 3.87             | 7.97             | 209.56    |
-| **Vector Search**   | 10      | 50          | 12.41            | 164.53           | 1,728.87  |
-| **Vector Search**   | 50      | 50          | 12.51            | 40.06            | 1,666.25  |
-| **Vector Search**   | 100     | 100         | 22.28            | 76.02            | 1,697.39  |
-| **Filtered Search** | 10      | 1           | 3.66             | 6.52             | 220.83    |
-| **Filtered Search** | 10      | 50          | 12.26            | 154.01           | 1,755.72  |
-| **Filtered Search** | 20      | 50          | 10.93            | 33.09            | 1,812.04  |
-| **Filtered Search** | **50**  | **1**       | **44.25**        | **2,422**        | **21.88** |
-| **Filtered Search** | **50**  | **50**      | **1,915**        | **22,628**       | **24.85** |
-| **Filtered Search** | **100** | **100**     | **3,629**        | **45,629**       | **24.57** |
-| **Hybrid Search**   | 10      | 1           | 13.50            | 27.91            | 68.92     |
-| **Hybrid Search**   | 50      | 50          | 50.72            | 183.88           | 264.24    |
-| **Hybrid Search**   | 100     | 100         | 109.87           | 363.80           | 249.18    |
+<p align="center">
+  <img src="doc/plots/article_cnpg_retrieval.png" alt="PostgreSQL CNPG retrieval performance — QPS and latency across concurrency and top_k" />
+</p>
 
-The pattern is stark. Filtered search at `top_k = 20` with 50 concurrent queries: **10.93 ms** average, **1,812 QPS**. The same filtered search at `top_k = 50` with 50 concurrent queries: **1,915 ms** average, **24.85 QPS**. That is a **175x latency increase** and a **99% QPS drop** from one step in the `top_k` axis.
+**How to read this chart:** The x-axis uses a composite notation `C:N | K:N`, where **C** is the concurrency level (number of parallel queries) and **K** is the `top_k` value (the `LIMIT` in the SQL query). For example, `C:8 | K:20` means 8 concurrent queries each requesting the top 20 nearest neighbors. The top panel shows throughput (Queries Per Second), while the bottom panel shows average latency on a logarithmic scale. Three search types are plotted: **Vector Search** (blue), **Filtered Search** (red), and **Hybrid Search** (green).
 
-Vector search shows no such cliff and scales smoothly across all `top_k` values. Hybrid search also has no `top_k`-dependent cliff, but notice something else: even at `top_k = 10` with a single query, hybrid search averages **13.50 ms** compared to vector search's **3.87 ms**. At `top_k = 100` with 100 concurrent queries, hybrid search delivers **249 QPS** while vector search delivers **1,697 QPS**. This consistent 3 to 4x performance gap is a separate problem that we will investigate after the filtered search deep-dive.
+The pattern is stark. Look at the red Filtered Search line: it tracks closely with Vector Search through the low `top_k` range, then suddenly collapses. Filtered search at `C:50 | K:20`: **10.93 ms** average, **1,812 QPS**. The same filtered search at `C:50 | K:50`: **1,915 ms** average, **24.85 QPS**. That is a **175x latency increase** and a **99% QPS drop** from one step in the `top_k` axis.
 
-At concurrency, the `top_k = 50` and `top_k = 100` filtered searches caused mass timeouts. The benchmark logs were filled with:
+Vector search (blue) shows no such cliff — its QPS and latency scale smoothly across all `top_k` values. Hybrid search (green) also has no `top_k`-dependent cliff, but notice something else: even at `C:1 | K:10`, hybrid search averages **13.50 ms** compared to vector search's **3.87 ms**. At `C:100 | K:100`, hybrid search delivers **249 QPS** while vector search delivers **1,697 QPS**. This consistent 3–4x performance gap is a separate problem that we will investigate after the filtered search deep-dive.
+
+At higher concurrency, the filtered search collapse becomes catastrophic. The `top_k = 50` and `top_k = 100` filtered searches caused mass timeouts. The benchmark logs were filled with:
 
 ```json
 {
@@ -568,9 +558,7 @@ At concurrency, the `top_k = 50` and `top_k = 100` filtered searches caused mass
 }
 ```
 
-This was not a concurrency issue. Even a **single query** with `top_k = 50` took 44 ms on average, but with a **P99 of 2,422 ms**, meaning some queries took seconds while others triggered the catastrophic plan. Something fundamental had changed in how PostgreSQL executed the query.
-
-_Charts: see `doc/plots/article_filtered_search_cliff.png` for the visual representation of this cliff._
+This was not a concurrency issue. Even a **single query** at `C:1 | K:50` took 44 ms on average, but with a **P99 of 2,422 ms**, meaning some queries took seconds while others triggered the catastrophic plan. Something fundamental had changed in how PostgreSQL executed the query.
 
 ---
 
@@ -700,16 +688,42 @@ The planner's cost model for HNSW indexes does not accurately reflect the true c
 
 At low `top_k` values, the HNSW path looks cheaper to the planner because it only needs to traverse a small portion of the graph. At higher `top_k` values, the planner's cost estimate for the HNSW path rises faster than the (underestimated) cost of the brute-force path, causing it to switch strategies.
 
-### The Exact Tipping Points
+### The Exact Tipping Point — It Is Filter-Agnostic
 
-I tested the planner's decision at fine-grained `top_k` values to find the exact thresholds:
+To find the exact threshold, I swept every `top_k` value from 1 to `ef_search` for all 16 book filters in the dataset using [`cnpg_planner_tipping_point_all_books.py`](scripts/cnpg_planner_tipping_point_all_books.py) — a script that runs `EXPLAIN (COSTS)` at each `top_k` value, detects whether the planner chose HNSW or Bitmap, and measures latency for each combination. The results are unambiguous: **every single filter switches at exactly the same `top_k`**, regardless of how many rows it matches or what percentage of the table it represents.
 
-| Filter Value                | Matching Rows | % of Total | HNSW Used Up To | Switches At |
-| --------------------------- | ------------- | ---------- | --------------- | ----------- |
-| 00. New Spring (smallest)   | 63,945        | 2.6%       | top_k = 40      | top_k = 45  |
-| 06. Lord of Chaos (largest) | 209,226       | 8.4%       | top_k = 40      | top_k = 42  |
+<p align="center">
+  <img src="doc/plots/article_cliff_all_books.png" alt="Filtered search cliff — all 16 book filters switch from HNSW to Bitmap at identical top_k" />
+</p>
 
-The threshold is remarkably consistent at around **top_k = 40 to 42** regardless of filter selectivity for this dataset. The DBeaver screenshots below confirm this with two additional filter configurations captured during the investigation.
+With the default `hnsw.ef_search = 40`, the planner uses the HNSW index for `top_k ≤ 40` and switches to the brute-force Bitmap Heap Scan at `top_k = 41` — for every filter from `'00. New Spring'` (2.56% of data, 63,945 rows) to `'06. Lord of Chaos'` (8.37%, 209,226 rows). The cliff is not gradual: latency jumps from ~3 ms to 1,000–5,000 ms in a single `top_k` increment.
+
+This finding is significant because it reveals the planner's decision is driven purely by the `LIMIT` value and `ef_search`, **not by filter selectivity or data distribution**. The planner computes the HNSW cost estimate using the `LIMIT` and `ef_search` parameters before it even considers how restrictive the filter is.
+
+### Does Raising `ef_search` Help?
+
+The natural instinct is to increase `hnsw.ef_search` — a larger search queue means the HNSW index explores more candidates, which should help it find enough filtered matches. So does raising `ef_search` also push the tipping point higher, giving us more usable `top_k` range?
+
+The answer is the opposite. I ran the same sweep at `ef_search = 40, 100, 200, 400` to measure the effect:
+
+<p align="center">
+  <img src="doc/plots/article_cliff_ef_search_impact.png" alt="Impact of ef_search on the filtered search cliff — higher ef_search triggers the cliff at a lower top_k" />
+</p>
+
+| ef_search        | HNSW Latency (avg) | Tipping Point | HNSW works up to |
+| ---------------- | ------------------ | ------------- | ---------------- |
+| **40** (default) | ~3 ms              | top_k = 41    | top_k ≤ 40       |
+| 100              | ~5 ms              | top_k = 38    | top_k ≤ 37       |
+| 200              | ~8 ms              | top_k = 33    | top_k ≤ 32       |
+| 400              | ~15 ms             | top_k = 25    | top_k ≤ 24       |
+
+Raising `ef_search` is a **double loss**: it increases HNSW query latency (the search queue does more work) _and_ it shrinks the usable `top_k` range. With `ef_search = 400`, the planner abandons HNSW at just `top_k = 25` — even requesting 25 nearest neighbors triggers the catastrophic brute-force path.
+
+The mechanism is straightforward: the planner costs the HNSW path proportionally to `ef_search × LIMIT`. A higher `ef_search` inflates the HNSW cost estimate, making the (underpriced) brute-force bitmap path appear competitive at a lower `top_k` threshold. Again, this was identical across all 16 filters at each `ef_search` setting.
+
+### Additional EXPLAIN ANALYZE Evidence
+
+The DBeaver screenshots below confirm the tipping-point switch with two additional filter configurations captured during the investigation.
 
 The first shows the high-selectivity case — filtering on `'06. Lord of Chaos'`, the largest book with ~209,226 matching rows (8.4% of the table). The bitmap plan fetches all 209,226 rows and computes brute-force distance on every one. Execution time: **479,739 ms (~480 seconds)** — more than twice as long as the `'00. New Spring'` case because the matching row count is more than three times larger.
 
@@ -727,11 +741,10 @@ This compound-filter result illustrates an important nuance: the catastrophic pe
 
 For your data, the tipping point will depend on:
 
-- Total number of rows
-- Number of rows matching the filter
-- Vector dimensionality
-- PostgreSQL statistics (`n_distinct`, row estimates)
+- `hnsw.ef_search` setting (higher ef_search = lower tipping point)
+- Vector dimensionality (higher dimensions = more expensive brute-force)
 - `random_page_cost` and other planner cost parameters
+- Total number of rows and table page count
 
 ---
 
@@ -745,7 +758,7 @@ flowchart LR
         direction TB
         W1["enable_bitmapscan = off"] -->|"~800 ms<br/>Still no HNSW"| R1["Band-aid"]
         W2["Disable all scan types"] -->|"~818 ms<br/>Planner ignores hints"| R2["Does not work"]
-        W3["hnsw.ef_search = 200"] -->|"~797 ms<br/>No plan change"| R3["Does not work"]
+        W3["hnsw.ef_search = 200"] -->|"Moves cliff to top_k=33<br/>Makes it worse"| R3["Counterproductive"]
         W4["hnsw.iterative_scan"] -->|"~795 ms<br/>Planner still avoids HNSW"| R4["Does not work"]
         W5["iterative_scan +<br/>disable all scans"] -->|"~871 ms<br/>Planner still avoids HNSW"| R5["Does not work"]
         W6["CTE Over-Fetch"] -->|"~187 ms<br/>Forces HNSW usage"| R6["Best workaround"]
@@ -753,7 +766,7 @@ flowchart LR
 
     style R1 fill:#f59e0b,color:#fff
     style R2 fill:#ef4444,color:#fff
-    style R3 fill:#ef4444,color:#fff
+    style R3 fill:#f59e0b,color:#fff
     style R4 fill:#ef4444,color:#fff
     style R5 fill:#ef4444,color:#fff
     style R6 fill:#22c55e,color:#fff
@@ -785,9 +798,9 @@ Execution time: **~818 ms**. Same brute-force pattern.
 SET hnsw.ef_search = 200;  -- Default is 40
 ```
 
-The theory: a larger `ef_search` means the HNSW index explores more candidates, potentially finding enough filtered matches. But this does not affect the planner's cost estimation.
+The theory: a larger `ef_search` means the HNSW index explores more candidates, potentially finding enough filtered matches. But as demonstrated in the [ef_search impact analysis](#does-raising-ef_search-help) above, raising `ef_search` actually makes things **worse**. The planner costs the HNSW path proportionally to `ef_search × LIMIT`, so a higher `ef_search` causes the planner to abandon HNSW at an even lower `top_k` threshold.
 
-**Result**: **No change in plan.** The planner still chose Bitmap Heap Scan. The `ef_search` parameter only affects HNSW behavior when the planner actually chooses to use the HNSW index.
+**Result**: **Counterproductive.** Not only did the planner still choose Bitmap Heap Scan for `top_k = 50`, but the tipping point moved _down_ — from `top_k = 41` (at `ef_search = 40`) to `top_k = 33` (at `ef_search = 200`). The usable `top_k` range shrank by 20%. At `ef_search = 400`, the cliff drops to just `top_k = 25`.
 
 ### Approach 4: `hnsw.iterative_scan = relaxed_order` (pgvector 0.8.0+)
 
@@ -861,15 +874,15 @@ await conn.execute("SET enable_bitmapscan = off")
 
 ## Summary of Workaround Results
 
-| Approach                           | Uses HNSW? | Latency (top_k=50) | Practical?                      |
-| ---------------------------------- | ---------- | ------------------ | ------------------------------- |
-| Default (no changes)               | No         | 215,251 ms         | Broken                          |
-| `enable_bitmapscan = off`          | No         | ~800 ms            | Band-aid                        |
-| Disable all scan types             | No         | ~818 ms            | Does not work                   |
-| `hnsw.ef_search = 200`             | No         | ~797 ms            | Does not work                   |
-| `hnsw.iterative_scan`              | No         | ~795 ms            | Does not work (planner ignores) |
-| Iterative scan + disable all scans | No         | ~871 ms            | Does not work                   |
-| **CTE over-fetch**                 | **Yes**    | **~187 ms**        | **Best workaround**             |
+| Approach                           | Uses HNSW? | Latency (top_k=50) | Practical?                                  |
+| ---------------------------------- | ---------- | ------------------ | ------------------------------------------- |
+| Default (no changes)               | No         | 215,251 ms         | Broken                                      |
+| `enable_bitmapscan = off`          | No         | ~800 ms            | Band-aid                                    |
+| Disable all scan types             | No         | ~818 ms            | Does not work                               |
+| `hnsw.ef_search = 200`             | No         | ~797 ms            | Counterproductive (cliff moves to top_k=33) |
+| `hnsw.iterative_scan`              | No         | ~795 ms            | Does not work (planner ignores)             |
+| Iterative scan + disable all scans | No         | ~871 ms            | Does not work                               |
+| **CTE over-fetch**                 | **Yes**    | **~187 ms**        | **Best workaround**                         |
 
 ---
 
@@ -997,7 +1010,7 @@ This is not a criticism of PostgreSQL. It is a general-purpose relational databa
 
 1. **Test your actual query patterns** with `EXPLAIN ANALYZE` at your production `top_k` values. Do not assume small-scale benchmarks will extrapolate.
 
-2. **Know your filtered search tipping point.** Run a sweep of `top_k` values with `EXPLAIN (COSTS)` to find where the planner switches from HNSW to brute-force for your specific data distribution.
+2. **Know your filtered search tipping point.** Run a sweep of `top_k` values with `EXPLAIN (COSTS)` to find where the planner switches from HNSW to brute-force. In our testing, this threshold was identical across all filter values — it depends on `ef_search` and `LIMIT`, not filter selectivity or data distribution. **Do not raise `hnsw.ef_search` as a workaround** — it makes the cliff happen at a _lower_ `top_k`.
 
 3. **Use the CTE over-fetch pattern** for filtered search when `top_k` exceeds your tipping point. Calculate the over-fetch multiplier based on your filter selectivity.
 
