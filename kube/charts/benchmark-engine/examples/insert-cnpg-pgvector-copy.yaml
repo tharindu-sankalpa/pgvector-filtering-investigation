@@ -42,8 +42,8 @@ env:
   DATABASE_CONFIG: "D16s_v3 16vCPU 64GB | psycopg3 COPY BINARY - WoT Dataset 2.5M"
 
   # Results database (Azure Managed PG - separate from CNPG vector DB)
-  RESULTS_PG_HOST: "pgvector-benchmark-server.postgres.database.azure.com"
-  RESULTS_PG_USER: "mlsvc_pgvector_admin"
+  RESULTS_PG_HOST: "results-db.example.invalid"
+  RESULTS_PG_USER: "results_user"
   RESULTS_PG_DATABASE: "benchmark_results"
 
 externalSecrets:

@@ -173,7 +173,7 @@ kubectl config use-context aks-cnpg-pgvector
 
 | Resource | Value |
 |----------|-------|
-| Registry | `benchmarkregistry504646de.azurecr.io` |
+| Registry | `<your-acr-name>.azurecr.io` |
 | Benchmark image | `benchmark-engine` |
 | Custom PG image | `postgresql-pgvector:18.1-pgvector` |
 | Pull secret | `acr-secret` (Kubernetes secret) |
@@ -187,7 +187,7 @@ There is **NO image tagged as `latest`**. Every code change requires:
 1. **Increment the tag** in `doc/execution-guide.md` (e.g., `v5.2.6-wot-8rep` → `v5.2.7-wot-8rep`)
 2. **Build with the new tag:**
    ```bash
-   export ACR_NAME="benchmarkregistry504646de"
+   export ACR_NAME="<your-acr-name>"
    export IMAGE_NAME="benchmark-engine"
    export TAG="v5.2.7-wot-8rep"  # INCREMENT THIS
    docker build -t $ACR_NAME.azurecr.io/$IMAGE_NAME:$TAG -f infrastructure/docker/Dockerfile .
@@ -222,7 +222,7 @@ Always follow `doc/execution-guide.md` for running benchmarks. Quick reference:
 kubectl config use-context benchmark-execution-aks
 
 # 2. Set required environment variables
-export ACR_NAME="benchmarkregistry504646de"
+export ACR_NAME="<your-acr-name>"
 export IMAGE_NAME="benchmark-engine"
 export TAG="v5.2.6-wot-8rep"  # GET CURRENT TAG FROM doc/execution-guide.md
 
@@ -470,7 +470,7 @@ PGSSLMODE=require PGHOST=$CNPG_PG_HOST PGPORT=$CNPG_PG_PORT \
   PGDATABASE=$CNPG_PG_DATABASE psql
 
 # Or explicitly (if CNPG_* not loaded):
-PGSSLMODE=require psql -h 51.104.162.145 -p 5432 -U benchmark_user -d benchmark_vectors
+PGSSLMODE=require psql -h 192.0.2.10 -p 5432 -U benchmark_user -d benchmark_vectors
 ```
 
 **Run pgvector benchmarks locally against CNPG:**
@@ -489,8 +489,8 @@ uv run python src/pgvector/03_retrieval_asyncpg.py  # example
 **Azure Managed PostgreSQL (Results / Legacy):**
 
 ```
-PGHOST=pgvector-benchmark-server.postgres.database.azure.com
-PGUSER=mlsvc_pgvector_admin
+PGHOST=results-db.example.invalid
+PGUSER=results_user
 PGPASSWORD=<password>
 PGDATABASE=vector_benchmark
 PGSSLMODE=require
@@ -499,7 +499,7 @@ PGSSLMODE=require
 **CNPG PostgreSQL (Vector DB):**
 
 ```
-CNPG_PG_HOST=51.104.162.145        # LoadBalancer IP from ml-pgvector-benchmark-lb
+CNPG_PG_HOST=192.0.2.10        # LoadBalancer IP from ml-pgvector-benchmark-lb
 CNPG_PG_PORT=5432
 CNPG_PG_USER=benchmark_user
 CNPG_PG_PASSWORD=<from ml-pgvector-benchmark-app secret>

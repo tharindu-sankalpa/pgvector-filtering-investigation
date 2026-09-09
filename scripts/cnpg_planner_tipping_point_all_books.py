@@ -57,7 +57,7 @@ logger = setup_structlog()
 # ---------------------------------------------------------------------------
 # Connection parameters — sourced from .env.azure
 # ---------------------------------------------------------------------------
-PG_HOST = os.getenv("CNPG_PG_HOST", "51.104.162.145")
+PG_HOST = os.getenv("CNPG_PG_HOST", "localhost")
 PG_PORT = int(os.getenv("CNPG_PG_PORT", "5432"))
 PG_DATABASE = os.getenv("VECTOR_PG_DATABASE", "benchmark_vectors")
 PG_USER = os.getenv("CNPG_PG_USER", "benchmark_user")

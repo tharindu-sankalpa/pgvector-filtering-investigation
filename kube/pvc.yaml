@@ -13,9 +13,9 @@ spec:
   csi:
     driver: file.csi.azure.com
     readOnly: false
-    volumeHandle: milvus-rg_benchdata792fda32_benchmark-data # Unique ID
+    volumeHandle: benchmark-rg_<your-storage-account>_benchmark-data # Unique ID
     volumeAttributes:
-      resourceGroup: milvus-rg
+      resourceGroup: benchmark-rg
       shareName: benchmark-data
     nodeStageSecretRef:
       name: azure-secret

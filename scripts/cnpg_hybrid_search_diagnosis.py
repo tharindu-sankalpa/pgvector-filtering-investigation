@@ -30,7 +30,7 @@ from shared.logger_structlog import setup_structlog
 
 logger = setup_structlog()
 
-PG_HOST = os.getenv("CNPG_PG_HOST", "51.104.162.145")
+PG_HOST = os.getenv("CNPG_PG_HOST", "localhost")
 PG_PORT = int(os.getenv("CNPG_PG_PORT", "5432"))
 PG_DATABASE = os.getenv("VECTOR_PG_DATABASE", "benchmark_vectors")
 PG_USER = os.getenv("CNPG_PG_USER", "benchmark_user")

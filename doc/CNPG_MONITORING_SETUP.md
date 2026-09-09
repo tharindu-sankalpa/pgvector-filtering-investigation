@@ -144,7 +144,7 @@ Then open `http://localhost:3000` in your browser.
 
 **Credentials:**
 - Username: `admin`
-- Password: `admin123`
+- Password: the unique password you supply when deploying Grafana. The committed values file contains a placeholder; supply the real value through a private Helm values file kept outside this repository.
 
 Navigate to **Dashboards** → find **"CNPG pgVector Benchmark Overview"**.
 

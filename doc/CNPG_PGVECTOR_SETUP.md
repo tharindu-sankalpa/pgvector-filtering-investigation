@@ -32,11 +32,11 @@ az vm list-usage --location northeurope --output table | grep "DSv3"
 
 ```bash
 # Set variables
-export RESOURCE_GROUP="milvus-rg"
+export RESOURCE_GROUP="benchmark-rg"
 export CLUSTER_NAME="aks-cnpg-pgvector"
 export LOCATION="northeurope"
 export NODE_VM_SIZE="Standard_D16s_v3"  # 16 vCPU, 64GB RAM
-export ACR_NAME="benchmarkregistry504646de"
+export ACR_NAME="<your-acr-name>"
 
 # Create AKS cluster in existing resource group
 az aks create \
@@ -115,11 +115,11 @@ The CNPG cluster hosts only the PostgreSQL database. Benchmark jobs run from the
 
 ```bash
 # Set variables
-export ACR_NAME="benchmarkregistry504646de"
+export ACR_NAME="<your-acr-name>"
 export PG_IMAGE_TAG="18.1-pgvector"
 
 # Build the image
-cd /home/tharindu/repos/exp-ai-search-migration-evaluation
+cd /path/to/pgvector-filtering-investigation
 docker build -t $ACR_NAME.azurecr.io/postgresql-pgvector:$PG_IMAGE_TAG \
     -f infrastructure/cnpg-pgvector/Dockerfile .
 
@@ -313,7 +313,7 @@ config:
 kubectl config use-context benchmark-execution-aks
 
 # Set benchmark image variables
-export ACR_NAME="benchmarkregistry504646de"
+export ACR_NAME="<your-acr-name>"
 export IMAGE_NAME="benchmark-engine"
 export TAG="v5.2.6-wot-8rep"  # Get current tag from doc/execution-guide.md
 
@@ -431,10 +431,10 @@ kubectl delete namespace cnpg-system
 
 ```bash
 # Set variables (same as Step 0)
-export RESOURCE_GROUP="milvus-rg"
+export RESOURCE_GROUP="benchmark-rg"
 export CLUSTER_NAME="aks-cnpg-pgvector"
 
-# Delete the AKS cluster (keeps other resources in milvus-rg)
+# Delete the AKS cluster (keeps other resources in benchmark-rg)
 az aks delete --resource-group $RESOURCE_GROUP --name $CLUSTER_NAME --yes --no-wait
 
 # Remove kubectl context
@@ -478,4 +478,3 @@ kubectl get endpoints ml-pgvector-benchmark-rw -n cnpg-pgvector
 - [CloudNativePG Documentation](https://cloudnative-pg.io/documentation/)
 - [pgVector GitHub](https://github.com/pgvector/pgvector)
 - [CNPG Cluster Reference](https://cloudnative-pg.io/documentation/current/cloudnative-pg.v1/)
-- [Nexus CNPG Architecture](https://ifsdev.atlassian.net/wiki/x/JwAwiw)

@@ -3,7 +3,7 @@
 # Declare variables to be passed into your templates.
 
 image:
-  repository: benchmarkregistry504646de.azurecr.io/benchmark-engine
+  repository: <your-acr-name>.azurecr.io/benchmark-engine
   pullPolicy: IfNotPresent
   # Overrides the image tag whose default is the chart appVersion.
   tag: "latest"
@@ -91,8 +91,8 @@ env:
   # ==========================================================================
   # Results database stores benchmark metrics only
   PG_PORT: "5432"
-  PG_HOST: "pgvector-benchmark-server.postgres.database.azure.com"
-  PG_USER: "mlsvc_pgvector_admin"
+  PG_HOST: "results-db.example.invalid"
+  PG_USER: "results_user"
 
   # New results database (Phase 4 refactoring)
   PG_DATABASE: "benchmark_results"

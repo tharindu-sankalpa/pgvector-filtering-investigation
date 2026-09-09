@@ -44,7 +44,8 @@ prometheus:
 # Grafana configuration
 grafana:
   enabled: true
-  adminPassword: "admin123"
+  # Override in a private Helm values file; do not commit the real password.
+  adminPassword: "<set-a-unique-grafana-password>"
 
   persistence:
     enabled: true

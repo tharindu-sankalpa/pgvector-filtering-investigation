@@ -28,7 +28,7 @@ docker login $ACR_NAME.azurecr.io --username $ACR_USERNAME --password $ACR_PASSW
 Run this command from the root of the repository:
 
 ```bash
-export ACR_NAME="benchmarkregistry504646de"
+export ACR_NAME="<your-acr-name>"
 export IMAGE_NAME="benchmark-engine"
 export TAG="v5.2.8-wot-8rep"
 
@@ -81,7 +81,7 @@ The benchmarks run as Kubernetes Jobs on a dedicated AKS cluster, separate from 
 ### Create the AKS Cluster
 
 ```bash
-RESOURCE_GROUP="milvus-rg"
+RESOURCE_GROUP="benchmark-rg"
 LOCATION="northeurope"
 AKS_CLUSTER_NAME="benchmark-execution-aks"
 
@@ -348,7 +348,7 @@ kubectl config use-context benchmark-execution-aks
 ### Common Variables
 
 ```bash
-export ACR_NAME="benchmarkregistry504646de"
+export ACR_NAME="<your-acr-name>"
 export IMAGE_NAME="benchmark-engine"
 export TAG="v5.2.8-wot-8rep"
 export NAMESPACE="default"

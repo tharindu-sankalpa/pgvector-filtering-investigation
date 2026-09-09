@@ -1,4 +1,4 @@
-# CNPG PostgreSQL Cluster with pgVector for ML Team Benchmarking
+# CNPG PostgreSQL Cluster with pgVector for Vector Search Benchmarking
 # Deploy after installing CNPG operator
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
@@ -12,7 +12,7 @@ spec:
   
   # Custom PostgreSQL image with pgVector
   # UPDATE THIS after building and pushing your image
-  imageName: benchmarkregistry504646de.azurecr.io/postgresql-pgvector:18.1-pgvector
+  imageName: <your-acr-name>.azurecr.io/postgresql-pgvector:18.1-pgvector
   
   # Pull secret for ACR
   imagePullSecrets:
