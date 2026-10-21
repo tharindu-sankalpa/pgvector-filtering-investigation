@@ -4,7 +4,9 @@ This guide describes the two Parquet datasets used by the benchmark framework, t
 
 ## About the Source Data
 
-The _Wheel of Time_ (WoT) is a high fantasy book series by Robert Jordan (and later Brandon Sanderson), spanning **14 novels plus a prequel** — over 4.4 million words in total. I regularly use this corpus for my RAG, vector database, and generative AI experiments because of its scale and richly interconnected world-building: it produces a large number of semantically dense text chunks with natural metadata partitioning (by book, by chapter) and a wide variety of searchable concepts — characters, locations, events, and magic system terminology.
+I used text extracted from EPUB editions of *The Wheel of Time* series as the corpus for these vector-search benchmarks. I split the text into chunks and kept book and chapter metadata for filtered search. The recurring characters, locations, and events provided a range of queries for vector and full-text search.
+
+This article shares the benchmark methodology and performance results. The source EPUB files, extracted-text datasets, embeddings, and query datasets are not distributed with this repository. Book titles identify the source material and filter values. To run the benchmarks, supply your own corpus and query files.
 
 The benchmark uses two Parquet datasets: a **vector dataset** containing the text chunk embeddings, and a **query dataset** containing the retrieval test queries. Both are stored in Azure Blob Storage and mounted into benchmark jobs via a Kubernetes PersistentVolumeClaim.
 
@@ -41,9 +43,9 @@ The query dataset contains **4,373 retrieval test queries** — real questions a
 
 | Column            | Type                       | Description                                                                         |
 | ----------------- | -------------------------- | ----------------------------------------------------------------------------------- |
-| `query_text`      | `string`                   | The natural language question (e.g., `"What is the Dragon Reborn's true name?"`)    |
+| `query_text`      | `string`                   | The natural language question (invented example: `"Who guards the castle?"`)    |
 | `query_embedding` | `list<float>` (1,536 dims) | OpenAI Ada-002 embedding of the question                                            |
-| `keywords`        | `list<string>`             | Extracted keywords for hybrid search (e.g., `["Dragon", "Reborn", "true", "name"]`) |
+| `keywords`        | `list<string>`             | Extracted keywords for hybrid search (e.g., `["guards", "castle"]`) |
 | `filter_field`    | `string`                   | Metadata field to filter on (always `"book_name"` in this dataset)                  |
 | `filter_value`    | `string`                   | The specific book to filter by (e.g., `"01. The Eye of the World"`)                 |
 

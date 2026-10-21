@@ -4,9 +4,9 @@ _A deep investigation into when pgvector abandons HNSW indexes, the query planne
 
 ## Introduction
 
-This investigation started as part of our work at IFS to evaluate vector databases for production use. I was architecting the vector database solution, and we were considering several options. PostgreSQL with pgvector had an obvious appeal: a familiar relational database that could store embeddings alongside application data, potentially avoiding the need to operate a separate database for vector search.
+This investigation started while I was evaluating vector databases for production use. PostgreSQL with pgvector was a strong candidate: a familiar relational database that could store embeddings alongside application data, potentially avoiding a separate database for vector search.
 
-To inform the architecture decision, I wanted to see how it handled the workloads we needed at scale. I tested pgvector with 2.5 million vectors, examined its behavior under metadata filtering and hybrid search, and dug into the query plans to understand the results. The findings felt worth sharing with other engineers evaluating vector databases or building AI infrastructure for production, including the setup, the performance problems I encountered, and the workarounds I tested.
+I wanted to base the architecture decision on measurements, so I tested pgvector with 2.5 million vectors, including metadata filtering and hybrid search, and dug into the query plans to understand the results. The findings felt worth sharing with other engineers evaluating vector databases or building infrastructure for production, including the setup, the performance problems I encountered, and the workarounds I tested.
 
 Two performance problems stood out in these tests:
 
@@ -87,7 +87,9 @@ Each guide is self-contained with exact commands, expected outputs, and troubles
 
 ## The Dataset
 
-The _Wheel of Time_ (WoT) is a high fantasy book series by Robert Jordan and Brandon Sanderson, spanning **14 novels plus a prequel**, over 4.4 million words in total. I regularly use this corpus for my RAG, vector database, and generative AI experiments because of its scale and richly interconnected world-building: it produces a large number of semantically dense text chunks with natural metadata partitioning (by book, by chapter) and a wide variety of searchable concepts: characters, locations, events, and magic system terminology.
+I used text extracted from EPUB editions of *The Wheel of Time* series as the corpus for these vector-search benchmarks. I split the text into chunks and kept book and chapter metadata for filtered search. The recurring characters, locations, and events provided a range of queries for vector and full-text search.
+
+This article shares the benchmark methodology and performance results. The source EPUB files, extracted-text datasets, embeddings, and query datasets are not distributed with this repository. Book titles identify the source material and filter values. To run the benchmarks, supply your own corpus and query files.
 
 The base dataset contains **100,105 real text chunk embeddings** generated using OpenAI's `text-embedding-ada-002` model (1,536 dimensions). To test pgvector at production scale, I synthetically expanded this to **2.5 million vectors** by duplicating text chunks with varied metadata combinations and generating synthetic embeddings, preserving the original data distribution characteristics while reaching a dataset size that stresses PostgreSQL's query planner and buffer cache.
 

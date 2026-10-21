@@ -32,6 +32,12 @@ Thumbs.db
 *.parquet
 data/*.parquet
 
+# Source ebooks (not distributed with the benchmark code)
+*.epub
+*.mobi
+*.azw
+*.azw3
+
 # uv
 uv.lock
 

@@ -53,13 +53,9 @@ The benchmarks use the **Wheel of Time (WoT)** dataset: 1536-dimensional OpenAI 
 | 2.5M (synthetic) | 2,500,000 | `gen_wot_2.5m.parquet`                      | ~22 GB  |
 | Queries          | 1,000     | `wot_retrieval_queries.parquet`             | ~39 MB  |
 
-### Download Links
+### Prepare Your Own Data
 
-| File                                        | Download                                                                                                         |
-| ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `wot_chunks_with_embeddings_100pct.parquet` | [Google Cloud Storage](https://storage.googleapis.com/fantasy-rag-lab/wot_chunks_with_embeddings_100pct.parquet) |
-| `wot_retrieval_queries.parquet`             | [Google Cloud Storage](https://storage.googleapis.com/fantasy-rag-lab/wot_retrieval_queries.parquet)             |
-| `gen_wot_2.5m.parquet` (optional)           | [Google Cloud Storage](https://storage.googleapis.com/fantasy-rag-lab/gen_wot_2.5m.parquet)                      |
+The source EPUB files, extracted text, embeddings, and query datasets are not distributed with this repository. Prepare your own Parquet files using the schemas in [DATASET.md](DATASET.md), and update the paths in the dataset configuration. The filenames in this guide describe the original benchmark inputs; they are not bundled downloads.
 
 The dataset config file (`data/wot_dataset.yaml`) describes column mappings used by the benchmark scripts:
 
