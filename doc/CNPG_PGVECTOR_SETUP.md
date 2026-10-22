@@ -1,480 +1,151 @@
-# CloudNativePG with pgVector - Self-Hosted Setup Guide
+# CloudNativePG and pgvector on Amazon EKS
 
-This guide walks through setting up a self-hosted PostgreSQL cluster with pgVector on a **dedicated AKS cluster** using CloudNativePG (CNPG) operator. This allows benchmarking pgVector on self-hosted infrastructure to compare with Azure Managed PostgreSQL results.
+This guide builds one EKS cluster in Mumbai, two CNPG database clusters, and the supporting infrastructure for the benchmark. Automation creates the resources; each stage has explicit verification commands. Use [execution-guide.md](execution-guide.md) for datasets and benchmark Jobs, [CNPG_MONITORING_SETUP.md](CNPG_MONITORING_SETUP.md) for metrics, and [DATASET.md](DATASET.md) for schema details.
 
-## Goal
+EC2 workers, the EKS control plane, EBS volumes, S3 objects, ECR storage and public IPv4 addresses incur charges. Three fixed on-demand workers stay running until deleted. Review the cost and teardown section before creating resources.
 
-Validate whether the pgVector limitations discovered on Azure Managed PostgreSQL also exist on self-hosted CNPG:
-- **Hybrid search collapse**: 2,096 QPS at 100K → 83 QPS at 2.5M (96% drop)
-- **Filtered search cliff**: 1,804 QPS at top_k=10 → 14.5 QPS at top_k≥50 (99% drop)
-- **CPU underutilization**: Only 30-40% CPU under max load
+## 0. Tools and variables
 
-## Prerequisites
-
-- Azure CLI (`az`) installed and logged in
-- Azure Container Registry (ACR) access
-- `kubectl` CLI installed
-- `helm` 3.x installed
-
-## Step 0: Create Dedicated AKS Cluster
-
-We create a dedicated AKS cluster in **North Europe** using **Standard_D16s_v3** nodes (16 vCPU, 64GB RAM) which matches the Azure Managed PostgreSQL D16ds_v5 configuration for fair comparison.
-
-### Check Available Quota
+Install AWS CLI v2, eksctl, kubectl, Helm, Docker with Buildx, Python 3.11+, and uv. Log in to AWS CLI. The scripts never require static AWS keys in Git. Use the existing ECR registry in your account, with dedicated repositories `pgvector-investigation/postgresql` and `pgvector-investigation/benchmark-engine`.
 
 ```bash
-# Verify DSv3 family quota in North Europe (should show available vCPUs)
-az vm list-usage --location northeurope --output table | grep "DSv3"
-# Expected: Standard DSv3 Family vCPUs - need at least 16 available
+export AWS_DEFAULT_REGION=ap-south-1
+export EKS_CLUSTER=pgvector-investigation
+export KUBECONFIG="$PWD/.local/kubeconfig"
+export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+export ECR_REGISTRY="$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com"
+export DATASET_BUCKET="pgvector-investigation-$ACCOUNT_ID-$AWS_DEFAULT_REGION"
+export TAG=eks-20261022.2  # .1 ran both measured studies; .2 adds ANALYZE to 02_create_indexes.py
+mkdir -p .local
+chmod 700 .local
+uv sync
 ```
 
-### Create Resource Group and AKS Cluster
+`.local/` contains private kubeconfig, rendered manifests, logs and account identifiers. It is ignored. Do not copy its contents into a public article. Every published command uses placeholders or derives the account ID at runtime.
+
+Stable software selected on 22 October 2026: PostgreSQL **18.6**, pgvector **0.8.7**, CNPG **1.30.1**. PostgreSQL 19 is a release candidate, so it is excluded. [PostgreSQL versions](https://www.postgresql.org/support/versioning/), [pgvector changelog](https://github.com/pgvector/pgvector/blob/v0.8.7/CHANGELOG.md), [CNPG release](https://github.com/cloudnative-pg/cloudnative-pg/releases/tag/v1.30.1).
+
+## 1. Review cluster shape and create EKS
+
+The [eksctl configuration](../infrastructure/aws/eks-cluster.yaml) selects Kubernetes 1.36, managed EC2 node groups, one worker AZ, and no NAT gateway. The control-plane subnet layout covers two AZs. Public worker subnets provide outbound registry/package access; no database or monitoring LoadBalancer is created. SSH access is not enabled. The API has private access as well as authenticated public access; restrict its public CIDRs to your administrative IPs if appropriate, keeping private access enabled so nodes can reach it.
+
+| Node group | Instance | Count | Placement |
+| --- | --- | --- | --- |
+| `vector-db` | m6i.4xlarge, 16 vCPU / 64 GiB | 1 | Vector database only; tainted |
+| `benchmarks` | m6i.2xlarge, 8 vCPU / 32 GiB | 1 | Jobs and dataset staging; tainted |
+| `services` | m6i.xlarge, 4 vCPU / 16 GiB | 1 | CNPG operator, results database, monitoring |
 
 ```bash
-# Set variables
-export RESOURCE_GROUP="benchmark-rg"
-export CLUSTER_NAME="aks-cnpg-pgvector"
-export LOCATION="northeurope"
-export NODE_VM_SIZE="Standard_D16s_v3"  # 16 vCPU, 64GB RAM
-export ACR_NAME="<your-acr-name>"
-
-# Create AKS cluster in existing resource group
-az aks create \
-    --resource-group $RESOURCE_GROUP \
-    --name $CLUSTER_NAME \
-    --location $LOCATION \
-    --node-count 1 \
-    --node-vm-size $NODE_VM_SIZE \
-    --enable-managed-identity \
-    --generate-ssh-keys \
-    --network-plugin azure \
-    --network-policy azure \
-    --enable-addons monitoring \
-    --attach-acr $ACR_NAME
-
-# Get credentials for kubectl
-az aks get-credentials --resource-group $RESOURCE_GROUP --name $CLUSTER_NAME --overwrite-existing
-
-# Verify connection
-kubectl get nodes
-# Should show: aks-nodepool1-xxxxx Ready <roles> <age> <version>
-
-# Verify node specs
-kubectl describe node | grep -E "cpu:|memory:|kubernetes.io/hostname"
+aws eks describe-cluster-versions --region "$AWS_DEFAULT_REGION"
+eksctl create cluster --config-file infrastructure/aws/eks-cluster.yaml \
+  --kubeconfig "$KUBECONFIG" --write-kubeconfig --set-kubeconfig-context=false
+aws eks update-kubeconfig --name "$EKS_CLUSTER" --region "$AWS_DEFAULT_REGION" \
+  --kubeconfig "$KUBECONFIG" --alias "$EKS_CLUSTER"
+kubectl get nodes -L workload,node.kubernetes.io/instance-type,topology.kubernetes.io/zone
 ```
 
-## Architecture
+The version must be offered by EKS in this region and supported by the installed eksctl. Capture the EKS console while the control plane is creating, then again when the control plane and all three node groups are Active. Do not begin application deployment until nodes are Ready.
 
-The CNPG cluster hosts only the PostgreSQL database. Benchmark jobs run from the existing `benchmark-execution-aks` cluster, connecting via the exposed LoadBalancer IP.
+## 2. Build and push both images
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│           CNPG AKS Cluster (aks-cnpg-pgvector)                          │
-│           Location: North Europe | Node: Standard_D16s_v3               │
-│                                                                         │
-│  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │                     cnpg-system namespace                          │  │
-│  │  ┌──────────────────────────────────────────────────────────────┐ │  │
-│  │  │ CNPG Operator (manages PostgreSQL lifecycle)                  │ │  │
-│  │  └──────────────────────────────────────────────────────────────┘ │  │
-│  └───────────────────────────────────────────────────────────────────┘  │
-│                              │                                           │
-│  ┌───────────────────────────▼───────────────────────────────────────┐  │
-│  │                   cnpg-pgvector namespace                          │  │
-│  │  ┌──────────────────────────────────────────────────────────────┐ │  │
-│  │  │ PostgreSQL Cluster (ml-pgvector-benchmark)                    │ │  │
-│  │  │ - Primary Pod: 8 vCPU / 32GB (limit 16 vCPU / 64GB)          │ │  │
-│  │  │ - pgVector extension enabled                                  │ │  │
-│  │  │ - 100GB Azure Premium SSD                                     │ │  │
-│  │  └──────────────────────────────────────────────────────────────┘ │  │
-│  │                              │                                     │  │
-│  │  ┌──────────────────────────▼──────────────────────────────────┐  │  │
-│  │  │ LoadBalancer Service (External IP)                           │  │  │
-│  │  │ - Exposes PostgreSQL on port 5432                            │  │  │
-│  │  └──────────────────────────────────────────────────────────────┘  │  │
-│  └───────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    │ TCP/5432
-                                    ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│           Benchmark Execution AKS Cluster (benchmark-execution-aks)     │
-│                                                                         │
-│  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │              benchmark-execution namespace                         │  │
-│  │  ┌──────────────────────────────────────────────────────────────┐ │  │
-│  │  │ Benchmark Jobs (Insert → Index → Retrieval)                   │ │  │
-│  │  │ - Connects to CNPG via LoadBalancer IP                        │ │  │
-│  │  │ - Results stored in Azure PostgreSQL (benchmark_results)      │ │  │
-│  │  └──────────────────────────────────────────────────────────────┘ │  │
-│  └───────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-## Step 1: Build PostgreSQL + pgVector Docker Image
+Create the two dedicated ECR repositories if they do not already exist. Do not reuse unrelated repositories or overwrite their tags.
 
 ```bash
-# Set variables
-export ACR_NAME="<your-acr-name>"
-export PG_IMAGE_TAG="18.1-pgvector"
-
-# Build the image
-cd /path/to/pgvector-filtering-investigation
-docker build -t $ACR_NAME.azurecr.io/postgresql-pgvector:$PG_IMAGE_TAG \
-    -f infrastructure/cnpg-pgvector/Dockerfile .
-
-# Push to ACR
-az acr login --name $ACR_NAME
-docker push $ACR_NAME.azurecr.io/postgresql-pgvector:$PG_IMAGE_TAG
+aws ecr create-repository --repository-name pgvector-investigation/postgresql \
+  --image-scanning-configuration scanOnPush=true
+aws ecr create-repository --repository-name pgvector-investigation/benchmark-engine \
+  --image-scanning-configuration scanOnPush=true
+bash scripts/aws/build-images.sh
 ```
 
-## Step 2: Install CNPG Operator
+The database Dockerfile builds pgvector from tag `v0.8.7` and checks source commit `f37c13f68b57d2c3472b2214fbcff699d6d34876`. `OPTFLAGS=""` avoids compiling only for the build machine CPU. Both images target **linux/amd64**, matching the m6i workers even when built on an Apple Silicon laptop. The final database image excludes the compiler toolchain. The benchmark image uses `uv.lock`; run `uv lock` when intentionally changing dependencies. The Python pgvector client version is independent of the database extension version.
 
 ```bash
-# Ensure you're connected to the new AKS cluster (from Step 0)
-kubectl config current-context
-# Should show: aks-cnpg-pgvector
-
-# Add CNPG Helm repo
-helm repo add cnpg https://cloudnative-pg.github.io/charts
-helm repo update
-
-# Create namespace for CNPG operator
-kubectl create namespace cnpg-system
-
-# Install CNPG operator
-helm install cnpg-operator cnpg/cloudnative-pg \
-    --namespace cnpg-system \
-    --set monitoring.podMonitorEnabled=false
-
-# Verify operator is running
-kubectl get pods -n cnpg-system
-# Should show: cnpg-cloudnative-pg-xxx Running
+aws ecr describe-images --repository-name pgvector-investigation/postgresql \
+  --image-ids imageTag=18.6-pgvector0.8.7 --query 'imageDetails[].{digest:imageDigest,tags:imageTags}'
+aws ecr describe-images --repository-name pgvector-investigation/benchmark-engine \
+  --image-ids imageTag="$TAG" --query 'imageDetails[].{digest:imageDigest,tags:imageTags}'
 ```
 
-## Step 3: Deploy PostgreSQL Cluster with pgVector
+Record the immutable digests in run evidence. For a frozen run, resolve tag references to digests before deploying. Capture the ECR image details after both pushes and inspect scan findings.
+
+## 3. Private S3 bucket, EBS driver and scoped service accounts
 
 ```bash
-# Create namespace for the PostgreSQL cluster
-kubectl create namespace cnpg-pgvector
-
-# Update the image name in cluster.yaml if needed
-# Then deploy the cluster
-kubectl apply -f infrastructure/cnpg-pgvector/cluster.yaml
-
-# Watch cluster come up (takes 2-5 minutes)
-kubectl get cluster -n cnpg-pgvector -w
-
-# Check pod status
-kubectl get pods -n cnpg-pgvector
-# Should show: ml-pgvector-benchmark-1 Running
-
-# Check cluster status
-kubectl describe cluster ml-pgvector-benchmark -n cnpg-pgvector
+uv run python scripts/aws/deploy.py storage
+uv run python scripts/aws/deploy.py addons
+kubectl get storageclass
+kubectl -n kube-system get pods -l app=ebs-csi-controller
+kubectl -n benchmarks get serviceaccount benchmark-data-reader dataset-uploader
 ```
 
-## Step 4: Expose PostgreSQL via LoadBalancer
+The dataset bucket blocks public access, enables SSE-S3 encryption and versioning, and aborts abandoned multipart uploads after one day. IRSA binds the dataset reader to `s3:GetObject` under `datasets/`. The temporary uploader additionally has only the bucket permissions needed to write and verify those objects. The EBS CSI controller uses a separate AWS-managed policy and service account. [EBS CSI requirements](https://docs.aws.amazon.com/eks/latest/userguide/ebs-csi.html).
 
-Since benchmark jobs run from a separate AKS cluster (`benchmark-execution-aks`), we need to expose PostgreSQL via a LoadBalancer with an external IP.
+Storage classes use encrypted gp3 volumes, `WaitForFirstConsumer` and `Retain`. The latter protects data during accidental PVC deletion but means deleting a cluster does not remove all billable volumes.
+
+## 4. Deploy the operator, both databases and monitoring
 
 ```bash
-# Create LoadBalancer service to expose PostgreSQL externally
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: Service
-metadata:
-  name: ml-pgvector-benchmark-lb
-  namespace: cnpg-pgvector
-spec:
-  type: LoadBalancer
-  ports:
-    - port: 5432
-      targetPort: 5432
-      protocol: TCP
-  selector:
-    cnpg.io/cluster: ml-pgvector-benchmark
-    role: primary
-EOF
-
-# Wait for external IP assignment (takes 1-2 minutes)
-kubectl get svc ml-pgvector-benchmark-lb -n cnpg-pgvector -w
-# Wait until EXTERNAL-IP changes from <pending> to an IP address
-
-# Get the external IP
-export CNPG_EXTERNAL_IP=$(kubectl get svc ml-pgvector-benchmark-lb -n cnpg-pgvector \
-    -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-echo "PostgreSQL External IP: $CNPG_EXTERNAL_IP"
+uv run python scripts/aws/deploy.py workloads
+uv run python scripts/aws/deploy.py secrets
+kubectl get cluster -A
+kubectl get pods,pvc -n cnpg-pgvector
+kubectl get pods,pvc -n benchmark-results
+kubectl get pods,pvc -n monitoring
+kubectl get svc -A
 ```
 
-## Step 5: Get Connection Credentials
+The helper selects a chart whose operator `appVersion` is exactly 1.30.1, resolves the monitoring chart version, and records both versions privately. It installs one operator and creates two CNPG Cluster resources:
+
+| Purpose | Namespace / Cluster | Database / owner | Storage |
+| --- | --- | --- | --- |
+| Vectors | `cnpg-pgvector` / `ml-pgvector-benchmark` | `benchmark_vectors` / `benchmark_user` | 200 GiB gp3, 6,000 IOPS / 250 MiB/s |
+| Results | `benchmark-results` / `benchmark-results` | `benchmark_results` / `results_user` | 20 GiB gp3 |
+
+CNPG creates application passwords automatically. The helper copies only the required connection keys into `benchmarks` Secrets. The results secret uses `RESULTS_PG_*`, so it cannot overwrite the vector connection's `PG_*`. Never commit generated Secrets or include password output in screenshots.
+
+The vector Cluster uses `postInitApplicationSQL` to enable `vector` in the application database, rather than only in a maintenance database. All database services are internal ClusterIP services. Verify there are **no LoadBalancer services**.
 
 ```bash
-# Get the superuser password (auto-generated by CNPG)
-export CNPG_SUPERUSER_PASSWORD=$(kubectl get secret ml-pgvector-benchmark-superuser -n cnpg-pgvector \
-    -o jsonpath='{.data.password}' | base64 -d)
-echo "Superuser password: $CNPG_SUPERUSER_PASSWORD"
-
-# Get the app user password
-export CNPG_APP_PASSWORD=$(kubectl get secret ml-pgvector-benchmark-app -n cnpg-pgvector \
-    -o jsonpath='{.data.password}' | base64 -d)
-echo "App user password: $CNPG_APP_PASSWORD"
-
-# Connection details for benchmarking:
-echo "
-================================================
-CNPG PostgreSQL Connection Details
-================================================
-Host:     $CNPG_EXTERNAL_IP
-Port:     5432
-Database: benchmark_vectors
-User:     benchmark_user (or postgres for superuser)
-Password: $CNPG_APP_PASSWORD
-================================================
-"
+kubectl -n cnpg-pgvector exec ml-pgvector-benchmark-1 -- \
+  psql -U postgres -d benchmark_vectors -c 'SELECT version();' \
+  -c "SELECT extname, extversion FROM pg_extension WHERE extname='vector';"
+kubectl -n benchmark-results exec benchmark-results-1 -- \
+  psql -U postgres -d benchmark_results -c 'SELECT current_database();'
+kubectl get pods -A -o wide
 ```
 
-## Step 6: Verify pgVector Extension
+Capture runtime version output, actual pod resource allocation, storage parameters and placement. Both CNPG clusters have a **single instance**. This setup cannot demonstrate replica failover or cross-AZ HA. See [monitoring guide](CNPG_MONITORING_SETUP.md) before running workloads.
+
+## 5. Challenges and experimental controls
+
+- **Resource contention:** namespace boundaries do not isolate CPU, memory or disks. Dedicated, tainted node groups keep the timed workload off the monitoring/results node; DaemonSets and shared control-plane effects remain.
+- **EBS topology:** volumes are AZ-local and normally ReadWriteOnce. The dataset cache is a single-node cache, not a multi-node shared file system. Run Jobs sequentially and keep their node placement consistent. WaitForFirstConsumer binds volumes to the actual worker AZ.
+- **EBS performance:** record volume size, IOPS, throughput, EC2 EBS bandwidth and queue depth. Otherwise, differences in storage can dominate query comparisons.
+- **Cache state:** loading the dataset and building an index warms caches. Explicitly distinguish first-read, warm-cache and repeated-run results.
+- **Changing software:** exact thresholds and query plans can change. Record PostgreSQL, pgvector, compiler/image digest and session GUCs; do not assume a LIMIT threshold measured elsewhere.
+- **Table statistics:** plan choice for filtered vector search depends on whether `ANALYZE` ran after the expression indexes were created. Record the statistics state (`pg_stats` for each expression index, and `last_analyze` / `last_autoanalyze` from `pg_stat_user_tables`) with every measurement. See [execution-guide.md](execution-guide.md#6a-reproduce-both-database-states-with-and-without-filter-statistics).
+- **Data transfer:** signed HTTPS sources expire. The worker streams in 32 MiB parts with four concurrent reads, verifies lengths, computes SHA-256, independently reads S3 back, and publishes a checksum manifest only after verification. Renew source credentials if the transfer cannot finish within their validity period.
+- **Results durability:** the results database has retained EBS but one instance. Take a logical export to S3 before teardown. A PVC is not a backup.
+- **Benchmark runtime:** the full 3 × 8 × 6 matrix is 144 scenarios before repetitions. Use a smoke run first. Query timeouts can make failed scenarios finish faster; record failures and returned rows beside QPS.
+
+## Setup issues and fixes
+
+**An empty context in a new project kubeconfig can look like a missing Kubernetes server.** The initial cluster-create command deliberately avoids changing a context, but a brand-new file then has no selected context. The observed error was `failed to download openapi: Get "http://localhost:8080/openapi/v2?timeout=32s": ... connection refused`. The fix is the explicit `aws eks update-kubeconfig ... --kubeconfig "$KUBECONFIG" --alias "$EKS_CLUSTER"` command in step 1. Do not disable OpenAPI validation to hide that connection problem.
+
+**eksctl's IAM service-account command consumes KUBECONFIG from the environment.** The installed command rejected `--kubeconfig` with `unknown flag: --kubeconfig`. The deployment helper sets the environment variable to the project file, while kubectl and Helm receive their supported explicit flags.
+
+**Dashboard queries need to match the cluster topology and exported units.** Node panels must select the vector node rather than average all three workers. PostgreSQL exports shared_buffers in 8 KiB blocks but work_mem in KiB; the dashboard now converts each to bytes before Grafana formats it. Verified runtime values are 4 GiB and 256 MiB respectively. Scan counters also use the actual `wot_chunks_2_5m` table name. See the monitoring guide for details.
+
+## 6. Costs and teardown
+
+Get the current Mumbai on-demand EC2, EKS, EBS gp3/IOPS/throughput, S3 and public IPv4 rates before starting; do not use an outdated hard-coded estimate. The configured compute cost is one m6i.4xlarge + one m6i.2xlarge + one m6i.xlarge + one EKS control plane per running hour. Add about 590 GiB configured EBS across roots/data/cache/monitoring, provisioned gp3 extras, S3/ECR usage and three public worker IPv4 addresses. Registry pulls, source egress and retries may add transfer charges. [AWS Pricing Calculator](https://calculator.aws/).
+
+Before deletion: export results, raw plans and logs; verify backups; note the dataset bucket, retained volumes and repository names. The following commands are **manual teardown**, not an automatic post-run action:
 
 ```bash
-# Connect via the external IP (using credentials from Step 5)
-PGPASSWORD=$CNPG_SUPERUSER_PASSWORD psql -h $CNPG_EXTERNAL_IP -U postgres -d benchmark_vectors
-
-# In psql, verify pgVector
-\dx
-# Should show: vector | 0.x.x | public | vector data type and ivfflat and hnsw access methods
-
-# Test vector operations
-CREATE TABLE test_vectors (id serial PRIMARY KEY, embedding vector(1536));
-INSERT INTO test_vectors (embedding) VALUES ('[1,2,3,...]'::vector);
-SELECT * FROM test_vectors ORDER BY embedding <=> '[1,2,3,...]' LIMIT 5;
-
-# Clean up test
-DROP TABLE test_vectors;
-\q
+# Deletes the named benchmark cluster and its workers; preserve evidence first.
+eksctl delete cluster --name pgvector-investigation --region ap-south-1 --wait
 ```
 
-## Step 7: Run Benchmarks
-
-Benchmarks run from the existing **benchmark-execution-aks** cluster, connecting to CNPG via the LoadBalancer external IP.
-
-### Switch to Benchmark Execution Cluster
-
-```bash
-# Switch kubectl context to benchmark execution cluster
-kubectl config use-context benchmark-execution-aks
-
-# Verify context
-kubectl config current-context
-# Should show: benchmark-execution-aks
-```
-
-### Update Helm Values with CNPG Connection
-
-Update the benchmark Helm values files with the CNPG external IP and password:
-
-```bash
-# Get the values from Step 4 and 5 (run on CNPG cluster first if not set)
-echo "CNPG_EXTERNAL_IP: $CNPG_EXTERNAL_IP"
-echo "CNPG_APP_PASSWORD: $CNPG_APP_PASSWORD"
-```
-
-Example values file for CNPG benchmarks:
-
-```yaml
-# kube/charts/benchmark-engine/examples/retrieval-cnpg-pgvector.yaml
-benchmark:
-  script: "03_retrieval_asyncpg.py"
-  scriptPath: "/app/src/pgvector"
-  databaseName: "PostgreSQL CNPG (Self-Hosted)"
-
-config:
-  database:
-    pg_host: "<CNPG_EXTERNAL_IP>"  # Replace with actual IP from Step 4
-    pg_port: "5432"
-    pg_database: "benchmark_vectors"
-    pg_user: "benchmark_user"
-    pg_password: "<CNPG_APP_PASSWORD>"  # Replace with password from Step 5
-  
-  dataset:
-    name: "wot_chunks_2_5m"
-    path: "/data/wot_chunks_2_5m.parquet"
-  
-  retrieval:
-    test_types: ["vector", "filtered", "hybrid"]
-    concurrency_levels: [1, 10, 50, 100]
-    top_k_values: [1, 5, 10, 20, 50, 100]
-    queries_per_test: 1000
-```
-
-### Run Benchmark Jobs
-
-```bash
-# Ensure you're on the benchmark-execution-aks cluster
-kubectl config use-context benchmark-execution-aks
-
-# Set benchmark image variables
-export ACR_NAME="<your-acr-name>"
-export IMAGE_NAME="benchmark-engine"
-export TAG="v5.2.6-wot-8rep"  # Get current tag from doc/execution-guide.md
-
-# 1. Run Insert Benchmark (load data)
-helm uninstall insert-cnpg-pgvector --ignore-not-found
-helm install insert-cnpg-pgvector ./kube/charts/benchmark-engine \
-    -f kube/charts/benchmark-engine/examples/insert-cnpg-pgvector.yaml \
-    --set image.repository=$ACR_NAME.azurecr.io/$IMAGE_NAME \
-    --set image.tag=$TAG
-
-# 2. Run Index Creation (after insert completes)
-helm uninstall index-cnpg-pgvector --ignore-not-found
-helm install index-cnpg-pgvector ./kube/charts/benchmark-engine \
-    -f kube/charts/benchmark-engine/examples/index-cnpg-pgvector.yaml \
-    --set image.repository=$ACR_NAME.azurecr.io/$IMAGE_NAME \
-    --set image.tag=$TAG
-
-# 3. Run Retrieval Benchmark (after index completes)
-helm uninstall retrieval-cnpg-pgvector --ignore-not-found
-helm install retrieval-cnpg-pgvector ./kube/charts/benchmark-engine \
-    -f kube/charts/benchmark-engine/examples/retrieval-cnpg-pgvector-asyncpg.yaml \
-    --set image.repository=$ACR_NAME.azurecr.io/$IMAGE_NAME \
-    --set image.tag=$TAG
-```
-
-### Option B: Direct Script Execution (for quick local testing)
-
-```bash
-# Set environment variables with external IP
-export PG_HOST="$CNPG_EXTERNAL_IP"
-export PG_PORT="5432"
-export PG_DATABASE="benchmark_vectors"
-export PG_USER="benchmark_user"
-export PG_PASSWORD="$CNPG_APP_PASSWORD"
-
-# Run insert benchmark first (to load data)
-uv run python src/pgvector/01_insert_benchmark.py
-
-# Run index creation
-uv run python src/pgvector/02_create_indexes.py
-
-# Run retrieval benchmark
-uv run python src/pgvector/03_retrieval_asyncpg.py
-```
-
-## Step 8: Compare Results
-
-After running benchmarks, compare CNPG results with Azure Managed PostgreSQL:
-
-| Metric | Azure Managed PG | CNPG Self-Hosted | Difference |
-|--------|------------------|------------------|------------|
-| Vector Search QPS (2.5M) | 1,353 | TBD | |
-| Filtered Search QPS (top_k=10) | 1,804 | TBD | |
-| Filtered Search QPS (top_k=50) | 14.5 | TBD | |
-| Hybrid Search QPS (2.5M) | 83 | TBD | |
-| CPU Utilization | 30-40% | TBD | |
-| HNSW Index Build Time | 2.8 hrs | TBD | |
-
-## Scaling Options
-
-### Add Read Replicas
-```bash
-# Edit cluster to increase instances
-kubectl edit cluster ml-pgvector-benchmark -n cnpg-pgvector
-# Change: instances: 1 → instances: 3
-
-# This creates 1 primary + 2 replicas
-# Use read-only service for read scaling:
-# ml-pgvector-benchmark-ro.cnpg-pgvector.svc.cluster.local
-```
-
-### Increase Resources
-```bash
-# Edit cluster resources
-kubectl edit cluster ml-pgvector-benchmark -n cnpg-pgvector
-# Increase CPU/memory limits
-```
-
-### Enable PgBouncer Connection Pooling
-```yaml
-# Add to cluster.yaml spec:
-pooler:
-  instances: 2
-  type: rw
-  pgbouncer:
-    poolMode: transaction
-    parameters:
-      max_client_conn: "1000"
-      default_pool_size: "25"
-```
-
-## Cleanup
-
-### Option A: Delete PostgreSQL Cluster Only (keep AKS for future use)
-
-```bash
-# Switch to CNPG cluster
-kubectl config use-context aks-cnpg-pgvector
-
-# Delete PostgreSQL cluster
-kubectl delete cluster ml-pgvector-benchmark -n cnpg-pgvector
-
-# Delete LoadBalancer service
-kubectl delete svc ml-pgvector-benchmark-lb -n cnpg-pgvector
-
-# Delete namespace
-kubectl delete namespace cnpg-pgvector
-
-# Uninstall CNPG operator
-helm uninstall cnpg-operator -n cnpg-system
-kubectl delete namespace cnpg-system
-```
-
-### Option B: Delete Entire AKS Cluster (full cleanup - recommended after benchmarking)
-
-```bash
-# Set variables (same as Step 0)
-export RESOURCE_GROUP="benchmark-rg"
-export CLUSTER_NAME="aks-cnpg-pgvector"
-
-# Delete the AKS cluster (keeps other resources in benchmark-rg)
-az aks delete --resource-group $RESOURCE_GROUP --name $CLUSTER_NAME --yes --no-wait
-
-# Remove kubectl context
-kubectl config delete-context $CLUSTER_NAME
-
-# Switch back to benchmark execution cluster
-kubectl config use-context benchmark-execution-aks
-```
-
-## Troubleshooting
-
-### Pod not starting
-```bash
-kubectl describe pod ml-pgvector-benchmark-1 -n cnpg-pgvector
-kubectl logs ml-pgvector-benchmark-1 -n cnpg-pgvector
-```
-
-### Image pull errors
-```bash
-# Ensure ACR credentials are configured
-kubectl create secret docker-registry acr-secret \
-    --docker-server=$ACR_NAME.azurecr.io \
-    --docker-username=$ACR_USERNAME \
-    --docker-password=$ACR_PASSWORD \
-    -n cnpg-pgvector
-
-# Add imagePullSecrets to cluster.yaml
-```
-
-### Connection refused
-```bash
-# Check service exists
-kubectl get svc -n cnpg-pgvector
-
-# Check endpoints
-kubectl get endpoints ml-pgvector-benchmark-rw -n cnpg-pgvector
-```
-
-## References
-
-- [CloudNativePG Documentation](https://cloudnative-pg.io/documentation/)
-- [pgVector GitHub](https://github.com/pgvector/pgvector)
-- [CNPG Cluster Reference](https://cloudnative-pg.io/documentation/current/cloudnative-pg.v1/)
+Then review retained EBS volumes/snapshots, the dataset bucket's current and noncurrent versions, ECR images and dedicated IRSA policies/roles. Delete only resources belonging to this investigation that you no longer need. S3 versioning means deleting current objects does not erase stored versions. Keep the ECR registry's unrelated repositories intact.

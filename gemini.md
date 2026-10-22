@@ -47,9 +47,9 @@ This repository follows a **Layered Documentation Model**:
 - Key code snippets (minimal, illustrative only)
 - Links to detailed implementations
 
-### Layer 2 - `/docs` Directory (Implementation Layer)
+### Layer 2 - `doc/` Directory (Implementation Layer)
 
-- Full AKS cluster setup
+- Full EKS cluster setup
 - CloudNativePG installation steps
 - Kubernetes manifests
 - Helm configurations
@@ -57,9 +57,9 @@ This repository follows a **Layered Documentation Model**:
 - Full reproducible environment setup
 - Deep technical commands and scripts
 
-The README should reference `/docs` when needed using phrasing such as:
+The README should reference `doc/` when needed using phrasing such as:
 
-> For full AKS cluster setup and CloudNativePG installation, see `/docs/aks-setup.md`.
+> For full EKS cluster setup and CloudNativePG installation, see `doc/CNPG_PGVECTOR_SETUP.md`.
 
 ---
 
@@ -79,7 +79,7 @@ When helping with README or article content:
 When including code:
 
 - Keep snippets short and illustrative
-- Move large scripts to `/docs`
+- Move large scripts to `doc/`
 - Link instead of embedding full configurations
 
 ---
@@ -108,7 +108,7 @@ It should read like:
 Anyone should be able to replicate the investigation by:
 
 1. Reading the README for conceptual understanding
-2. Following `/docs` for environment recreation
+2. Following `doc/` for environment recreation
 3. Running provided benchmark scripts
 
 Reproducibility is critical.
@@ -151,97 +151,13 @@ The objective is to generate **debug-ready, production-quality code** that is **
 
 ## Kubernetes & Benchmark Operations (CRITICAL - Read First)
 
-### Infrastructure — Three AKS Clusters + ACR
+### Infrastructure — one EKS cluster
 
-This project uses separate Kubernetes clusters. **You MUST switch to the correct context before any kubectl/helm operations:**
+Use `ap-south-1`, cluster `pgvector-investigation`, and an explicit `.local/kubeconfig`. Do not change unrelated contexts. Namespace mapping: `cnpg-system` operator; `cnpg-pgvector` vector database; `benchmark-results` results database; `benchmarks` execution; `monitoring` metrics. Read `doc/CNPG_PGVECTOR_SETUP.md` and `doc/execution-guide.md` before operating workloads. All database access is through internal services or local port-forwards. Images are tagged and stored in ECR. Rebuild the benchmark image after code changes and record its digest. Never use the mutable `latest` tag for a measured run.
 
-| Cluster | Purpose | Context Name |
-|---------|---------|--------------|
-| **Benchmark Execution** | Running benchmark jobs, viewing job logs | `benchmark-execution-aks` |
-| **CNPG PostgreSQL** | Self-hosted CloudNativePG PostgreSQL + pgVector cluster, monitoring | `aks-cnpg-pgvector` |
-| **Azure Managed PostgreSQL** | Azure PostgreSQL Flexible Server storing benchmark results | _(accessed via `.env.azure` credentials, not kubectl)_ |
+### Article preservation
 
-```bash
-# For benchmark job operations (helm install benchmark, view logs, check job status)
-kubectl config use-context benchmark-execution-aks
-
-# For CNPG PostgreSQL operations (pod status, psql access, monitoring, cluster config)
-kubectl config use-context aks-cnpg-pgvector
-```
-
-**Azure Container Registry (ACR):**
-
-| Resource | Value |
-|----------|-------|
-| Registry | `<your-acr-name>.azurecr.io` |
-| Benchmark image | `benchmark-engine` |
-| Custom PG image | `postgresql-pgvector:18.1-pgvector` |
-| Pull secret | `acr-secret` (Kubernetes secret) |
-
-**CRITICAL:** Never assume the current context is correct. Always explicitly switch before operations.
-
-### Docker Image Tagging Policy — NO `latest` TAG
-
-There is **NO image tagged as `latest`**. Every code change requires:
-
-1. **Increment the tag** in `doc/execution-guide.md` (e.g., `v5.2.6-wot-8rep` → `v5.2.7-wot-8rep`)
-2. **Build with the new tag:**
-   ```bash
-   export ACR_NAME="<your-acr-name>"
-   export IMAGE_NAME="benchmark-engine"
-   export TAG="v5.2.7-wot-8rep"  # INCREMENT THIS
-   docker build -t $ACR_NAME.azurecr.io/$IMAGE_NAME:$TAG -f infrastructure/docker/Dockerfile .
-   ```
-3. **Push to ACR:**
-   ```bash
-   docker push $ACR_NAME.azurecr.io/$IMAGE_NAME:$TAG
-   ```
-4. **Update `doc/execution-guide.md`** with the new tag value
-
-### Code Changes Require Docker Rebuild
-
-Any changes to these files require a Docker image rebuild:
-- `src/pgvector/*.py` — PostgreSQL benchmark scripts
-- `src/shared/*.py` — Shared utilities
-- `pyproject.toml` — Dependencies
-
-**Workflow for code changes:**
-1. Make code changes
-2. Test locally if possible: `uv run python scripts/your_script.py`
-3. Update TAG in `doc/execution-guide.md`
-4. Build Docker image with new tag
-5. Push to ACR
-6. Deploy benchmark with new tag
-
-### Benchmark Execution Workflow
-
-Always follow `doc/execution-guide.md` for running benchmarks. Quick reference:
-
-```bash
-# 1. Switch to benchmark cluster
-kubectl config use-context benchmark-execution-aks
-
-# 2. Set required environment variables
-export ACR_NAME="<your-acr-name>"
-export IMAGE_NAME="benchmark-engine"
-export TAG="v5.2.6-wot-8rep"  # GET CURRENT TAG FROM doc/execution-guide.md
-
-# 3. Uninstall previous and install new benchmark
-helm uninstall <benchmark-name> --ignore-not-found
-helm install <benchmark-name> ./kube/charts/benchmark-engine \
-  -f kube/charts/benchmark-engine/examples/<config>.yaml \
-  --set image.repository=$ACR_NAME.azurecr.io/$IMAGE_NAME \
-  --set image.tag=$TAG
-```
-
-### Key Documentation References
-
-- `doc/execution-guide.md` — Complete benchmark execution guide, current image tag
-- `doc/CNPG_PGVECTOR_SETUP.md` — CNPG PostgreSQL cluster setup guide
-- `doc/CNPG_MONITORING_SETUP.md` — CNPG Prometheus/Grafana monitoring stack and metrics reference
-- `infrastructure/cnpg-pgvector/cluster.yaml` — CNPG PostgreSQL cluster definition (resources, PG config, monitoring)
-
----
+README.md is canonical and is the article: a big-picture summary first, then concepts, then the evidence. Preserve all concepts, theory, query-plan explanations, and the workaround evidence (summary in the README, full detail in `doc/workarounds.md`). Every number comes from the recorded EKS runs in `doc/RUN_EVIDENCE.md` and `doc/results/`; do not invent or relabel measurements. The central finding: the filtered-search cliff comes from missing statistics for the `metadata->>'book_name'` expression index (no `ANALYZE` after `CREATE INDEX`), and `ANALYZE` removes it. Regenerate `doc/article.md` with `python scripts/sync_article.py` after editing the README. Public documentation describes EKS only. Dataset transfer credentials and source URLs belong in ignored private state.
 
 ## Mandatory Logging Standard — `structlog` (Non-Negotiable)
 
@@ -381,134 +297,7 @@ All subsequent logs in that function **must use the bound `log` variable**.
 
 ## PostgreSQL Database Access
 
-The benchmark system uses **two separate PostgreSQL deployments**:
-
-| Deployment | Purpose | Location |
-|------------|---------|----------|
-| **Azure Managed PostgreSQL** | Results DB (benchmark metrics), Legacy DB | Azure Flexible Server |
-| **CNPG PostgreSQL** | Vector DB (pgvector embeddings) | Self-hosted on `aks-cnpg-pgvector` |
-
-Connection credentials are stored in `.env.azure`. Load once before any `psql` or benchmark runs:
-
-```bash
-export $(grep -v '^#' .env.azure | xargs)
-```
-
----
-
-### Azure Managed PostgreSQL (Results DB)
-
-Benchmark metrics are stored in an Azure PostgreSQL Flexible Server. Use for querying results, summaries, and legacy data.
-
-**CLI connection (psql):**
-
-```bash
-# Connect to Results Database (benchmark metrics only)
-PGSSLMODE=require PGHOST=$PG_HOST PGUSER=$PG_USER PGPASSWORD=$PG_PASSWORD \
-  PGDATABASE=benchmark_results psql
-
-# Connect to Legacy/Vector Database (old combined database on Azure)
-PGSSLMODE=require PGHOST=$PG_HOST PGUSER=$PG_USER PGPASSWORD=$PG_PASSWORD \
-  PGDATABASE=vector_benchmark psql
-```
-
-**Key tables (Results DB):**
-
-| Table | Description |
-|-------|-------------|
-| `benchmark_retrieval_summary` | Aggregated metrics per test scenario (avg, p50, p95, p99, qps) |
-| `benchmark_insert_summary` | Insert/ingestion benchmark summaries |
-| `benchmark_index_summary` | Index creation timing metrics |
-
-**Common queries:**
-
-```sql
--- List all databases tested
-SELECT DISTINCT database_name FROM benchmark_retrieval_summary;
-
--- View latest results
-SELECT database_name, test_type, top_k, concurrency_level,
-       ROUND(avg_latency_seconds * 1000, 2) as avg_latency_ms,
-       ROUND(p99_latency_seconds * 1000, 2) as p99_latency_ms,
-       ROUND(qps, 2) as qps
-FROM benchmark_retrieval_summary
-ORDER BY id DESC
-LIMIT 20;
-
--- Delete results for a specific database
-DELETE FROM benchmark_retrieval_summary
-WHERE database_name = '<database_name_to_delete>';
-```
-
----
-
-### CNPG PostgreSQL (Vector DB — Self-Hosted)
-
-The CloudNativePG cluster on `aks-cnpg-pgvector` hosts the pgvector data. Use for running benchmarks, diagnosing queries, or inspecting embeddings.
-
-**Get credentials from Kubernetes (if not in .env.azure):**
-
-```bash
-kubectl config use-context aks-cnpg-pgvector
-
-# App user (benchmark_user) — used for benchmarks
-kubectl get secret ml-pgvector-benchmark-app -n cnpg-pgvector \
-  -o jsonpath='{.data.user}' | base64 -d
-kubectl get secret ml-pgvector-benchmark-app -n cnpg-pgvector \
-  -o jsonpath='{.data.password}' | base64 -d
-
-# LoadBalancer external IP (public host for psql from your machine)
-kubectl get svc ml-pgvector-benchmark-lb -n cnpg-pgvector -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
-```
-
-**CLI connection (psql) — using .env.azure CNPG vars:**
-
-```bash
-# Connect to CNPG vector database (benchmark_vectors)
-PGSSLMODE=require PGHOST=$CNPG_PG_HOST PGPORT=$CNPG_PG_PORT \
-  PGUSER=$CNPG_PG_USER PGPASSWORD=$CNPG_PG_PASSWORD \
-  PGDATABASE=$CNPG_PG_DATABASE psql
-
-# Or explicitly (if CNPG_* not loaded):
-PGSSLMODE=require psql -h 192.0.2.10 -p 5432 -U benchmark_user -d benchmark_vectors
-```
-
-**Run pgvector benchmarks locally against CNPG:**
-
-```bash
-export PG_HOST=$CNPG_PG_HOST PG_USER=$CNPG_PG_USER \
-  PGPASSWORD=$CNPG_PG_PASSWORD VECTOR_PG_DATABASE=$CNPG_PG_DATABASE
-
-uv run python src/pgvector/03_retrieval_asyncpg.py  # example
-```
-
----
-
-### Environment Variables (in .env.azure)
-
-**Azure Managed PostgreSQL (Results / Legacy):**
-
-```
-PGHOST=results-db.example.invalid
-PGUSER=results_user
-PGPASSWORD=<password>
-PGDATABASE=vector_benchmark
-PGSSLMODE=require
-```
-
-**CNPG PostgreSQL (Vector DB):**
-
-```
-CNPG_PG_HOST=192.0.2.10        # LoadBalancer IP from ml-pgvector-benchmark-lb
-CNPG_PG_PORT=5432
-CNPG_PG_USER=benchmark_user
-CNPG_PG_PASSWORD=<from ml-pgvector-benchmark-app secret>
-CNPG_PG_DATABASE=benchmark_vectors
-```
-
-**K8s overrides (values.yaml):** `RESULTS_PG_DATABASE=benchmark_results`, `VECTOR_PG_DATABASE=benchmark_vectors`
-
----
+Use the commands in `doc/execution-guide.md`. Local DBeaver endpoints are `127.0.0.1:15432` for vectors and `127.0.0.1:15433` for results. CNPG generates application credential Secrets. Copy only the required keys into `benchmarks`, and never print or commit passwords. Local optional overrides use `.env.aws` (shape in `example.env.aws`).
 
 ## Enforcement Expectation
 

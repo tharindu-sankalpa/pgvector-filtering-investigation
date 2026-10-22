@@ -87,7 +87,7 @@ def load_dataset_chunked(
 
     Uses PyArrow's ParquetFile.iter_batches() to stream data from disk
     without loading the entire file into memory. This is essential for
-    datasets that exceed available RAM (e.g., 2.5M vectors at ~22GB).
+    datasets that exceed available RAM (e.g., 2.5M vectors in a 30.94 GB Parquet file).
 
     Each yielded DataFrame is an independent chunk that can be processed
     and then garbage-collected, keeping peak memory usage proportional
@@ -409,7 +409,7 @@ def get_filter_expression_for_query(
 
     Args:
         query: Query dictionary with optional 'filters' key.
-        database_type: One of 'milvus', 'mongodb', 'pgvector', 'azure_ai_search'.
+        database_type: One of 'milvus', 'mongodb', 'pgvector'.
         default_filter_column: Default column to filter on if no filters in query.
         default_filter_value: Default value to filter on if no filters in query.
 
@@ -440,9 +440,6 @@ def get_filter_expression_for_query(
         # PostgreSQL WHERE clause
         return f"metadata->>'{field}' = '{value}'"
 
-    elif database_type == "azure_ai_search":
-        # Azure AI Search OData filter
-        return f"{field} eq '{value}'"
 
     else:
         # Generic fallback

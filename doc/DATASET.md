@@ -8,7 +8,11 @@ I used text extracted from EPUB editions of *The Wheel of Time* series as the co
 
 This article shares the benchmark methodology and performance results. The source EPUB files, extracted-text datasets, embeddings, and query datasets are not distributed with this repository. Book titles identify the source material and filter values. To run the benchmarks, supply your own corpus and query files.
 
-The benchmark uses two Parquet datasets: a **vector dataset** containing the text chunk embeddings, and a **query dataset** containing the retrieval test queries. Both are stored in Azure Blob Storage and mounted into benchmark jobs via a Kubernetes PersistentVolumeClaim.
+The benchmark uses two Parquet datasets: a **vector dataset** containing the text chunk embeddings, and a **query dataset** containing the retrieval test queries. Both are stored privately in Amazon S3. A staging Job verifies SHA-256 checksums and copies the files into an EBS-backed PersistentVolumeClaim before benchmark execution. Timed retrieval does not include S3 download time.
+
+## Files and integrity
+
+The verified vector file `gen_wot_2.5m.parquet` is **30,940,143,579 bytes** (30.94 GB, about 28.82 GiB). The query file `wot_retrieval_queries.parquet` is **40,132,555 bytes**. S3 stores them under `datasets/`, alongside `SHA256SUMS`. See [RUN_EVIDENCE.md](RUN_EVIDENCE.md) for the verified SHA-256 values. A staging Job checks those hashes again on the EBS cache before execution.
 
 ## Vector Dataset Schema
 

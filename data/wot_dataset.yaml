@@ -9,7 +9,7 @@ name: wheel_of_time
 
 # Path to the main data file containing vector embeddings
 # This file contains the actual text chunks and their embeddings
-data_file: ../data/wot_chunks_with_embeddings_100pct.parquet
+data_file: ../data/gen_wot_2.5m.parquet
 
 # Path to the query file for benchmark testing
 # Prepare this file using the query schema in doc/DATASET.md
@@ -39,4 +39,4 @@ metadata:
   source: EPUB corpus used for the benchmark (not distributed)
   embedding_model: text-embedding-ada-002
   embedding_dimensions: 1536
-  description: Wheel of Time book series text chunks for RAG evaluation
+  description: 2.5M-row synthetic-scale vector workload with book/chapter filters

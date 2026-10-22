@@ -1,0 +1,49 @@
+# Retrieval matrix only, against an already loaded and indexed table.
+# Uses the same image, client resources and settings as full-study-job.yaml, so
+# two runs differ only in database state. Used for the "no expression
+# statistics" run: recreate the metadata B-tree without ANALYZE, then apply this.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: <job-name>
+  namespace: benchmarks
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      nodeSelector: {workload: benchmarks}
+      tolerations:
+        - {key: workload, operator: Equal, value: benchmarks, effect: NoSchedule}
+      restartPolicy: Never
+      containers:
+        - name: retrieval
+          image: <account-id>.dkr.ecr.ap-south-1.amazonaws.com/pgvector-investigation/benchmark-engine@<benchmark-digest>
+          command: [python, /app/src/pgvector/03_retrieval_asyncpg.py]
+          env:
+            - {name: TABLE_NAME, value: wot_chunks_2_5m}
+            - {name: QUERY_FILE, value: /app/data/wot_retrieval_queries.parquet}
+            - {name: VECTOR_PG_DATABASE, value: benchmark_vectors}
+            - {name: RESULTS_PG_DATABASE, value: benchmark_results}
+            - {name: DATASET_SIZE, value: "2500000"}
+            - {name: CONCURRENCY_LEVELS, value: "1,2,4,8,16,32,50,100"}
+            - {name: TOP_K_VALUES, value: "1,5,10,20,50,100"}
+            - {name: BENCHMARK_NUM_QUERIES, value: "4373"}
+            - {name: WARMUP_QUERIES, value: "50"}
+            - {name: HNSW_EF_SEARCH_MIN, value: "64"}
+            - {name: HNSW_ITERATIVE_SCAN, value: strict_order}
+            - {name: QUERY_TIMEOUT, value: "120"}
+            - {name: PGSSLMODE, value: require}
+            - {name: TEST_LOCATION, value: EKS ap-south-1}
+            - {name: DATABASE_NAME_OVERRIDE, value: PostgreSQL CNPG Self-Hosted}
+            - {name: DATABASE_CONFIG, value: "<label describing the database state>"}
+          envFrom:
+            - secretRef: {name: cnpg-pgvector-secrets}
+            - secretRef: {name: pg-results-secrets}
+          resources:
+            requests: {cpu: "4", memory: 8Gi}
+            limits: {cpu: "6", memory: 24Gi}
+          volumeMounts:
+            - {name: data, mountPath: /app/data, readOnly: true}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: benchmark-dataset-pvc}

@@ -1,0 +1,54 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+metadata:
+  name: pgvector-investigation
+  region: ap-south-1
+  version: "1.36"
+availabilityZones: [ap-south-1a, ap-south-1b]
+iam:
+  withOIDC: true
+vpc:
+  nat:
+    gateway: Disable
+  clusterEndpoints:
+    publicAccess: true
+    privateAccess: true
+managedNodeGroups:
+  - name: services
+    instanceType: m6i.xlarge
+    desiredCapacity: 1
+    minSize: 1
+    maxSize: 1
+    availabilityZones: [ap-south-1a]
+    volumeSize: 80
+    volumeType: gp3
+    labels: {workload: services}
+    disableIMDSv1: true
+  - name: vector-db
+    instanceType: m6i.4xlarge
+    desiredCapacity: 1
+    minSize: 1
+    maxSize: 1
+    availabilityZones: [ap-south-1a]
+    volumeSize: 80
+    volumeType: gp3
+    labels: {workload: vector-db}
+    taints:
+      - {key: workload, value: vector-db, effect: NoSchedule}
+    disableIMDSv1: true
+  - name: benchmarks
+    instanceType: m6i.2xlarge
+    desiredCapacity: 1
+    minSize: 1
+    maxSize: 1
+    availabilityZones: [ap-south-1a]
+    volumeSize: 100
+    volumeType: gp3
+    labels: {workload: benchmarks}
+    taints:
+      - {key: workload, value: benchmarks, effect: NoSchedule}
+    disableIMDSv1: true
+addons:
+  - name: vpc-cni
+  - name: coredns
+  - name: kube-proxy

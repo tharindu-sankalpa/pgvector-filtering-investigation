@@ -10,15 +10,13 @@ NUM_QUERIES = int(os.getenv("BENCHMARK_NUM_QUERIES", "100"))
 # Database Names
 DB_MILVUS_ZILLIZ_SERVERLESS = "Milvus Zilliz Cloud Serverless"
 DB_MILVUS_ZILLIZ_DEDICATED = "Milvus Zilliz Cloud Dedicated"
-DB_MILVUS_AKS_STANDALONE = "Milvus AKS Self-Hosted (Standalone)"
-DB_MILVUS_AKS_DISTRIBUTED = "Milvus AKS Self-Hosted (Distributed)"
-DB_PGVECTOR_AZURE = "PGVector on Azure PostgreSQL"
+DB_MILVUS_EKS_STANDALONE = "Milvus EKS Self-Hosted (Standalone)"
+DB_MILVUS_EKS_DISTRIBUTED = "Milvus EKS Self-Hosted (Distributed)"
+DB_PGVECTOR_AWS = "PGVector on CNPG PostgreSQL"
 DB_MONGODB_ATLAS = "MongoDB Atlas Search"
-DB_AZURE_AI_SEARCH = "Azure AI Search"
 
 # Test Locations
-LOC_AZURE_NORTH_EUROPE = "North Europe Azure Machine Learning Compute Instance"
-LOC_AZURE_SOUTH_ASIA = "South Asia Azure Machine Learning Compute Instance"
+LOC_EKS_MUMBAI = "EKS ap-south-1"
 LOC_LOCAL_PC = "Local PC (Sri Lanka – SLT Pipeline)"
 
 def get_env_int(key, default):

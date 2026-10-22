@@ -1,0 +1,12 @@
+# S3 is the durable dataset source. A separate stage job fills this EBS cache.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: benchmark-dataset-pvc
+  namespace: benchmarks
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: gp3
+  resources:
+    requests:
+      storage: 80Gi

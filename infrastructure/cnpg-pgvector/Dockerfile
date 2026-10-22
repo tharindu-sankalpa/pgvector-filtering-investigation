@@ -1,17 +1,16 @@
-# PostgreSQL 18 with pgVector extension for CNPG
-
-FROM ghcr.io/cloudnative-pg/postgresql:18.1-standard-trixie@sha256:7a72106d396a9c6d06ca25be191700c86031e0a06ccdeaf1a31da14f198cbbc4
-
+# Latest stable PostgreSQL / pgvector verified on 2026-10-22.
+ARG POSTGRES_IMAGE=ghcr.io/cloudnative-pg/postgresql:18.6-system-trixie@sha256:f7e00138159bb45d70b624ba25e446924cb3ed1bf366d13e936c3f81b914064e
+FROM ${POSTGRES_IMAGE} AS builder
 USER root
-
-# Install pgVector extension
-RUN apt update \
-      && apt install -y gnupg postgresql-common apt-transport-https lsb-release wget build-essential git \
-      && /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y \
-      && apt update \
-      && apt install -y postgresql-18-pgvector \
-      && apt-get autoremove -y \
-      && rm -rf /var/lib/apt/lists/* /var/cache/* /var/log/*
-
-# Switch back to CNPG user
+ARG PGVECTOR_VERSION=0.8.7
+ARG PGVECTOR_COMMIT=f37c13f68b57d2c3472b2214fbcff699d6d34876
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential git ca-certificates postgresql-server-dev-18 \
+    && git clone --depth 1 --branch v${PGVECTOR_VERSION} https://github.com/pgvector/pgvector.git /tmp/pgvector \
+    && cd /tmp/pgvector && test "$(git rev-parse HEAD)" = "${PGVECTOR_COMMIT}" \
+    && make OPTFLAGS="" PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config \
+    && make install PG_CONFIG=/usr/lib/postgresql/18/bin/pg_config
+FROM ${POSTGRES_IMAGE}
+COPY --from=builder /usr/lib/postgresql/18/lib/vector.so /usr/lib/postgresql/18/lib/vector.so
+COPY --from=builder /usr/share/postgresql/18/extension/vector* /usr/share/postgresql/18/extension/
 USER 26

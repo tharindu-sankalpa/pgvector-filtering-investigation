@@ -38,8 +38,16 @@ data/*.parquet
 *.azw
 *.azw3
 
-# uv
-uv.lock
+# uv.lock is committed for reproducible benchmark image builds.
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Local source checkouts and deployment state
+repos/
+.local/
+.aws/
+*.tfstate*
+
+# Per-run side charts written by the tipping-point sweep; the article uses the combined charts
+doc/plots/tipping_point_latency_ef*.png

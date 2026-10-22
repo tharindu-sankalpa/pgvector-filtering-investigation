@@ -12,11 +12,9 @@ spec:
   
   # Custom PostgreSQL image with pgVector
   # UPDATE THIS after building and pushing your image
-  imageName: <your-acr-name>.azurecr.io/postgresql-pgvector:18.1-pgvector
+  imageName: <account-id>.dkr.ecr.ap-south-1.amazonaws.com/pgvector-investigation/postgresql:18.6-pgvector0.8.7
   
-  # Pull secret for ACR
-  imagePullSecrets:
-    - name: acr-secret
+  # ECR pulls use the managed node IAM role.
   
   # PostgreSQL configuration
   postgresql:
@@ -32,7 +30,7 @@ spec:
       # Connection settings
       max_connections: "200"
       
-      # TCP keepalives — required to prevent Azure Load Balancer (4min idle timeout)
+      # TCP keepalives — required to prevent idle network connections
       # from silently dropping long-running connections
       tcp_keepalives_idle: "60"
       tcp_keepalives_interval: "10"
@@ -56,25 +54,29 @@ spec:
   
   # Storage configuration
   storage:
-    size: 100Gi
-    storageClass: managed-csi-premium  # Azure Premium SSD
+    size: 200Gi
+    storageClass: gp3-benchmark  # Encrypted EBS gp3, 6000 IOPS / 250 MiB/s
   
   # Resource limits - adjust based on your benchmarking needs
-  # These match the Azure PostgreSQL D16ds_v5 (16 vCores, 64GB) used in original benchmarks
+  # m6i.4xlarge: 16 vCPU / 64 GiB. Leave capacity for the OS and DaemonSets.
   resources:
     requests:
-      cpu: "8"
-      memory: "32Gi"
+      cpu: "12"
+      memory: "48Gi"
     limits:
-      cpu: "16"
-      memory: "64Gi"
+      cpu: "14"
+      memory: "56Gi"
   
   # Superuser access for benchmarking (disable in production)
   enableSuperuserAccess: true
   
+  affinity:
+    nodeSelector: {workload: vector-db}
+    tolerations:
+      - {key: workload, operator: Equal, value: vector-db, effect: NoSchedule}
+
   # Monitoring - PodMonitor is created separately (see cnpg-podmonitor.yaml)
   monitoring:
-    enablePodMonitor: false
     customQueriesConfigMap:
       - name: cnpg-extra-monitoring
         key: queries
@@ -88,5 +90,5 @@ spec:
       localeCType: C
       localeCollate: C
       # Enable pgVector extension on database creation
-      postInitSQL:
+      postInitApplicationSQL:
         - CREATE EXTENSION IF NOT EXISTS vector;

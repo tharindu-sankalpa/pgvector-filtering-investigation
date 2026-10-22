@@ -34,7 +34,7 @@ from shared.logger_structlog import setup_structlog
 logger = setup_structlog()
 
 # Load environment variables
-ENV_PATH = Path(__file__).parent.parent.parent / ".env.azure"
+ENV_PATH = Path(__file__).parent.parent.parent / ".env.aws"
 load_dotenv(ENV_PATH)
 
 
@@ -155,7 +155,7 @@ def get_database_name() -> str:
     override_name = os.getenv("DATABASE_NAME_OVERRIDE")
     if override_name:
         return override_name
-    return common_utils.DB_PGVECTOR_AZURE
+    return common_utils.DB_PGVECTOR_AWS
 
 
 def get_connection_string() -> str:
@@ -414,7 +414,7 @@ def get_hybrid_search_query_asyncpg(top_k: int, table_name: str = TABLE_NAME) ->
 # but is NOT used by the current benchmark scripts.
 #
 # Current benchmarks use the unified schema (content + metadata JSONB) defined
-# in setup_database() in 01_insert_benchmark.py.
+# in setup_database() in 01_insert_benchmark_copy.py.
 
 
 def get_create_table_sql(config, embedding_dim: int = 1536) -> str:

@@ -1,0 +1,35 @@
+# A temporary worker streams signed HTTPS URLs from a Kubernetes Secret to S3.
+# SOURCE_FILES_JSON is private and must never be placed in a ConfigMap or Git.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: copy-datasets-to-s3
+  namespace: benchmarks
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: dataset-uploader
+      nodeSelector: {workload: benchmarks}
+      tolerations:
+        - {key: workload, operator: Equal, value: benchmarks, effect: NoSchedule}
+      restartPolicy: Never
+      containers:
+        - name: copy
+          image: python:3.12-slim
+          command: [/bin/sh, -ec]
+          args:
+            - pip install --no-cache-dir boto3==1.43.117 requests==2.34.2 && python /scripts/stream_to_s3.py
+          envFrom:
+            - secretRef: {name: dataset-source-urls}
+          env:
+            - {name: AWS_DEFAULT_REGION, value: ap-south-1}
+            - {name: DATASET_BUCKET, value: <dataset-bucket>}
+          resources:
+            requests: {cpu: 500m, memory: 512Mi}
+            limits: {cpu: "2", memory: 2Gi}
+          volumeMounts:
+            - {name: scripts, mountPath: /scripts, readOnly: true}
+      volumes:
+        - name: scripts
+          configMap: {name: dataset-copy-script}

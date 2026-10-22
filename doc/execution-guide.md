@@ -1,543 +1,243 @@
-# Benchmark Execution Guide (pgvector / CNPG)
+# Benchmark Execution on One EKS Cluster
 
-This guide covers everything needed to reproduce the pgvector benchmarks: building the Docker image, provisioning infrastructure, creating secrets, and running benchmark jobs via Helm.
+The benchmark Jobs, vector database, results database and monitoring all run in `pgvector-investigation`, region `ap-south-1`. Complete [CNPG setup](CNPG_PGVECTOR_SETUP.md) and [monitoring](CNPG_MONITORING_SETUP.md) first. Review [dataset schemas](DATASET.md) before loading data.
 
-For the CNPG PostgreSQL cluster setup (operator, CRD, LoadBalancer), see [CNPG_PGVECTOR_SETUP.md](./CNPG_PGVECTOR_SETUP.md).
-For Prometheus/Grafana monitoring, see [CNPG_MONITORING_SETUP.md](./CNPG_MONITORING_SETUP.md).
-
----
-
-## 1. Docker Build & Push
-
-Before running any benchmark, you must build the Docker image and push it to your container registry.
-
-**IMPORTANT: There is NO `latest` tag. Always use explicit versioned tags.**
-
-### Prerequisites
-
-- You have an Azure Container Registry (ACR) created.
-- **Login to Registry**:
+## 1. Environment and internal connections
 
 ```bash
-export $(grep -v '^#' .env.azure | xargs)
-docker login $ACR_NAME.azurecr.io --username $ACR_USERNAME --password $ACR_PASSWORD
+export AWS_DEFAULT_REGION=ap-south-1
+export KUBECONFIG="$PWD/.local/kubeconfig"
+export TAG=eks-20261022.2  # .1 ran both measured studies; .2 adds ANALYZE to 02_create_indexes.py
 ```
 
-### Build Command
+The vector service is `ml-pgvector-benchmark-rw.cnpg-pgvector.svc.cluster.local:5432`; the results service is `benchmark-results-rw.benchmark-results.svc.cluster.local:5432`. CNPG supplies the credentials. `deploy.py secrets` creates `cnpg-pgvector-secrets` and `pg-results-secrets` in `benchmarks` without printing their values. All timed workloads use these internal services.
 
-Run this command from the root of the repository:
+## 2. Put the dataset in S3 without a local dataset download
+
+The source URLs are private inputs, not repository configuration. Provide read-only, time-limited HTTPS URLs for the two Parquet files through a Kubernetes Secret named `dataset-source-urls`. Its `SOURCE_FILES_JSON` value is a JSON list with `name`, `url` and exact integer `size`. Do not paste signed URLs into shell history, a ConfigMap, screenshots or Git.
+
+The temporary [copy worker](../infrastructure/aws/source-copy-job.yaml) uses the `dataset-uploader` IRSA service account. The [streaming script](../scripts/aws/stream_to_s3.py) reads source ranges directly into bounded worker memory (four 32 MiB parts) and uploads S3 multipart parts. No dataset bytes pass through the local administrative machine or its filesystem. It verifies object length and independently rereads the S3 object to compare SHA-256. It writes `datasets/SHA256SUMS` after both files pass.
 
 ```bash
-export ACR_NAME="<your-acr-name>"
-export IMAGE_NAME="benchmark-engine"
-export TAG="v5.2.8-wot-8rep"
-
-docker build -t $ACR_NAME.azurecr.io/$IMAGE_NAME:$TAG -f infrastructure/docker/Dockerfile .
+uv run python scripts/aws/source-secret.py
+uv run python scripts/aws/deploy.py copy
+kubectl -n benchmarks logs -f job/copy-datasets-to-s3
+kubectl -n benchmarks wait job/copy-datasets-to-s3 --for=condition=complete --timeout=3h
 ```
 
-### Push Command
+A failed transfer does not produce a valid checksum manifest. Use a fresh source credential if it has expired. After success, remove the temporary source URL Secret and the upload Job/service account once no longer needed. Keep the read-only benchmark-data-reader service account for dataset staging. S3 stays private.
+
+## 3. Stage S3 files to the EBS cache
 
 ```bash
-docker push $ACR_NAME.azurecr.io/$IMAGE_NAME:$TAG
+uv run python scripts/aws/deploy.py stage
+kubectl -n benchmarks logs -f job/stage-datasets
+kubectl -n benchmarks wait job/stage-datasets --for=condition=complete --timeout=1h
+kubectl -n benchmarks get pvc benchmark-dataset-pvc
 ```
 
----
+The staging Job copies both Parquet files and the checksum manifest to the 80 GiB EBS PVC, then runs `sha256sum -c`. It writes temporary filenames and renames only completed downloads. Do not start timed work until checksums pass. S3 download time is excluded from database benchmarks. Parquet loading remains part of the insert benchmark's measured/reporting behavior; distinguish input-read time from database COPY time in analysis.
 
-## 2. Datasets
+## 4. Smoke test before the full workload
 
-The benchmarks use the **Wheel of Time (WoT)** dataset: 1536-dimensional OpenAI embeddings of text chunks from 16 books. Two scales are tested:
-
-| Dataset          | Records   | File                                        | Size    |
-| ---------------- | --------- | ------------------------------------------- | ------- |
-| 100K (base)      | 100,105   | `wot_chunks_with_embeddings_100pct.parquet` | ~872 MB |
-| 2.5M (synthetic) | 2,500,000 | `gen_wot_2.5m.parquet`                      | ~22 GB  |
-| Queries          | 1,000     | `wot_retrieval_queries.parquet`             | ~39 MB  |
-
-### Prepare Your Own Data
-
-The source EPUB files, extracted text, embeddings, and query datasets are not distributed with this repository. Prepare your own Parquet files using the schemas in [DATASET.md](DATASET.md), and update the paths in the dataset configuration. The filenames in this guide describe the original benchmark inputs; they are not bundled downloads.
-
-The dataset config file (`data/wot_dataset.yaml`) describes column mappings used by the benchmark scripts:
-
-```yaml
-name: wheel_of_time
-embedding_column: embedding
-text_column: text
-filter_columns: [book_name, chapter_title]
-query_embedding_column: query_embedding
-query_text_column: query_text
-```
-
----
-
-## 3. Benchmark Execution Cluster (AKS)
-
-The benchmarks run as Kubernetes Jobs on a dedicated AKS cluster, separate from the CNPG PostgreSQL cluster. Benchmark pods connect to the CNPG PostgreSQL instance via its LoadBalancer external IP.
-
-### Create the AKS Cluster
+First verify the runtime versions and connection paths using the setup guide. Run the integrated smoke Job before a full load:
 
 ```bash
-RESOURCE_GROUP="benchmark-rg"
-LOCATION="northeurope"
-AKS_CLUSTER_NAME="benchmark-execution-aks"
-
-az aks create \
-    --resource-group $RESOURCE_GROUP \
-    --name $AKS_CLUSTER_NAME \
-    --location $LOCATION \
-    --node-count 1 \
-    --node-vm-size Standard_D8s_v3 \
-    --generate-ssh-keys
-
-az aks get-credentials --resource-group $RESOURCE_GROUP --name $AKS_CLUSTER_NAME
+uv run python scripts/aws/deploy.py smoke
+kubectl -n benchmarks logs -f job/eks-stack-smoke
+kubectl -n benchmarks wait job/eks-stack-smoke --for=condition=complete --timeout=30m
 ```
 
-### Create Azure Container Registry (ACR)
+It verifies Parquet counts/dimensions, extracts 1,000 rows on the AWS worker, and executes the real COPY, index and retrieval entrypoints against `wot_eks_smoke`. It stores explicitly labelled smoke summaries and checks all three index/search modes. Filters may match fewer than top_k rows in the small sample; this run validates execution and connectivity, not retrieval quality at scale. It does not change the original Parquet files and is not a 2.5M-row performance run.
+
+Verify the actual Parquet schemas/row counts on the worker. The intended sizes are 2.5 million vectors and 4,373 queries, with 1,536 dimensions. Results tables are created by the insert/retrieval scripts through `setup_results_tables`.
+
+The COPY insert script **drops and recreates the configured table**. It is appropriate for this isolated benchmark database; check `TABLE_NAME` and the target service before running it. Repeating an insert is a fresh load, not an append.
+
+For the complete study, use one durable EKS Job. It waits for the successful smoke Job and refuses to start while another Job is active:
 
 ```bash
-ACR_NAME="benchmarkregistry$(openssl rand -hex 4)"
-
-az acr create \
-    --resource-group $RESOURCE_GROUP \
-    --name $ACR_NAME \
-    --sku Basic
-
-az acr update -n $ACR_NAME --admin-enabled true
-
-ACR_USERNAME=$(az acr credential show --name $ACR_NAME --query "username" -o tsv)
-ACR_PASSWORD=$(az acr credential show --name $ACR_NAME --query "passwords[0].value" -o tsv)
-
-kubectl create secret docker-registry acr-secret \
-    --docker-server=$ACR_NAME.azurecr.io \
-    --docker-username=$ACR_USERNAME \
-    --docker-password=$ACR_PASSWORD
-
-kubectl patch serviceaccount default -p '{"imagePullSecrets": [{"name": "acr-secret"}]}'
+uv run python scripts/aws/deploy.py full
+# Follow the Job name printed by the command (also saved in .local/full-study.json):
+kubectl -n benchmarks logs -f job/<study-job-name>
+kubectl -n benchmarks get job <study-job-name>
 ```
 
-### Verify Context
-
-Always switch to the benchmark execution cluster before running Helm commands:
-
-```bash
-kubectl config use-context benchmark-execution-aks
-kubectl config current-context
-```
-
----
-
-## 4. Storage: PVC and Dataset Upload
-
-Benchmark pods mount an Azure Files share via a PersistentVolumeClaim (PVC) to access the parquet dataset files.
-
-### Create Storage Account and File Share
-
-```bash
-STORAGE_ACCOUNT_NAME="benchdata$(openssl rand -hex 4)"
-FILE_SHARE_NAME="benchmark-data"
-
-az storage account create \
-    --resource-group $RESOURCE_GROUP \
-    --name $STORAGE_ACCOUNT_NAME \
-    --location $LOCATION \
-    --sku Standard_LRS \
-    --kind StorageV2
-
-CONNECTION_STRING=$(az storage account show-connection-string \
-    --resource-group $RESOURCE_GROUP \
-    --name $STORAGE_ACCOUNT_NAME \
-    --output tsv)
-
-az storage share-rm create \
-    --resource-group $RESOURCE_GROUP \
-    --storage-account $STORAGE_ACCOUNT_NAME \
-    --name $FILE_SHARE_NAME \
-    --quota 100
-```
-
-### Create Azure Storage Secret
-
-```bash
-STORAGE_KEY=$(az storage account keys list \
-    --resource-group $RESOURCE_GROUP \
-    --account-name $STORAGE_ACCOUNT_NAME \
-    --query "[0].value" -o tsv)
-
-kubectl create secret generic azure-secret \
-    --from-literal=azurestorageaccountname=$STORAGE_ACCOUNT_NAME \
-    --from-literal=azurestorageaccountkey=$STORAGE_KEY
-```
-
-### Apply PV and PVC
-
-Edit `kube/pvc.yaml` to set your resource group, storage account name, and share name in the `volumeHandle` and `volumeAttributes`, then apply:
-
-```bash
-kubectl apply -f kube/pvc.yaml
-```
-
-### Upload Dataset Files
-
-```bash
-az storage file upload \
-    --account-name $STORAGE_ACCOUNT_NAME \
-    --share-name $FILE_SHARE_NAME \
-    --source wot_chunks_with_embeddings_100pct.parquet \
-    --path wot_chunks_with_embeddings_100pct.parquet
-
-az storage file upload \
-    --account-name $STORAGE_ACCOUNT_NAME \
-    --share-name $FILE_SHARE_NAME \
-    --source wot_retrieval_queries.parquet \
-    --path wot_retrieval_queries.parquet
-
-az storage file upload \
-    --account-name $STORAGE_ACCOUNT_NAME \
-    --share-name $FILE_SHARE_NAME \
-    --source data/wot_dataset.yaml \
-    --path wot_dataset.yaml
-```
-
-For the 2.5M dataset (optional, ~22GB):
-
-```bash
-az storage file upload \
-    --account-name $STORAGE_ACCOUNT_NAME \
-    --share-name $FILE_SHARE_NAME \
-    --source gen_wot_2.5m.parquet \
-    --path gen_wot_2.5m.parquet
-```
-
----
-
-## 5. Kubernetes Secrets
-
-Two secrets are needed on the **benchmark-execution-aks** cluster. Secrets contain only credentials; database names are configured via environment variables in the Helm value files.
-
-### Results Database Secret (`pg-results-secrets`)
-
-Stores credentials for the PostgreSQL database where benchmark metrics (QPS, latency, etc.) are saved.
-
-```bash
-kubectl create secret generic pg-results-secrets \
-    --from-literal=PG_HOST="<your-postgres-host>.postgres.database.azure.com" \
-    --from-literal=PG_PORT="5432" \
-    --from-literal=PG_USER="<your-username>" \
-    --from-literal=PG_PASSWORD="<your-password>" \
-    --dry-run=client -o yaml | kubectl apply -f -
-```
-
-### CNPG pgvector Target Secret (`cnpg-pgvector-secrets`)
-
-Stores credentials for the CNPG PostgreSQL cluster being benchmarked (the LoadBalancer IP and the benchmark user password).
-
-```bash
-kubectl create secret generic cnpg-pgvector-secrets \
-    --from-literal=PG_HOST="<cnpg-loadbalancer-external-ip>" \
-    --from-literal=PG_PASSWORD="<benchmark-user-password>" \
-    --dry-run=client -o yaml | kubectl apply -f -
-```
-
-### Network Access
-
-If your results database is an Azure Database for PostgreSQL with firewall rules, you must whitelist the AKS cluster's outbound IP:
-
-```bash
-kubectl run public-ip-check --image=curlimages/curl --restart=Never -- curl -s https://api.ipify.org
-kubectl logs -f public-ip-check
-kubectl delete pod public-ip-check
-```
-
-Add the returned IP to your PostgreSQL server's firewall rules in the Azure Portal (Server > Networking > Firewall rules).
-
----
-
-## 6. Results Database Setup
-
-Benchmark results are stored in a dedicated PostgreSQL database (`benchmark_results`), separate from the vector data.
-
-### Create the Database
-
-```bash
-export $(grep -v '^#' .env.azure | xargs)
-psql "host=$PG_HOST port=5432 dbname=postgres user=$PG_USER password=$PG_PASSWORD sslmode=require"
-```
+The Job runs COPY, verifies 2,500,000 rows, builds and validates all three index definitions, runs ANALYZE, then executes the 144-scenario retrieval matrix. It pins the benchmark image digest and mounts an immutable copy of its orchestration script. Its run ID, settings, image digests, phase and failure evidence are stored in `benchmark_study_runs` on the results database. It keeps running when the local terminal closes. A failed Job does not automatically restart or erase its evidence; investigate before submitting another fresh load.
 
 ```sql
-CREATE DATABASE benchmark_results;
-CREATE DATABASE vector_data;
-\l
+SELECT run_id, phase, started_at, updated_at, finished_at, settings, evidence
+FROM benchmark_study_runs ORDER BY started_at DESC;
 ```
 
-### Create Summary Tables
+The matrix is 3 patterns × 8 concurrency levels × 6 top_k values = 144 scenarios, each with 4,373 queries (629,712 measured query attempts). `WARMUP_QUERIES=50` is the requested setting; the existing entrypoint rounds down across four top_k values and executes 48 warmup queries. Warmup does not prove the full index is resident in memory. Validate successful-query counts, clipped results and failure logs before publishing.
 
-Connect to the results database and create the tables (or let the benchmark scripts auto-create them):
+Do not start another Job that touches the vector database while the study is running; the timings would interfere.
+
+## 5. What the index phase does
+
+The study's index phase runs [02_create_indexes.py](../src/pgvector/02_create_indexes.py). It creates the HNSW index (`m=16`, `ef_construction=64`, `maintenance_work_mem=2GB`), the GIN full-text index on `to_tsvector('english', content)` and the B-tree on `metadata->>'book_name'`, records each build time in `benchmark_index_summary`, and then runs `ANALYZE wot_chunks_2_5m`. That last step collects the statistics for the `book_name` expression. Its log event `expression_statistics_present` lists the indexes that now have statistics; an empty list means the table is in the trap state described in section 6a. `full_study.py` also runs `ANALYZE` after the index phase, so the full study is covered twice.
+
+The script drops named indexes before timing each build, but PostgreSQL generates its own names for expression indexes, so an index-only rerun can leave duplicates. Inspect the catalog before repeating a timing. The full study's COPY recreates the table, so its index build always starts clean. The index script logs an individual failure and continues; `full_study.py` therefore validates all three index definitions before it starts retrieval.
+
+## 6. Rerun the retrieval matrix without reloading
+
+To rerun only the retrieval matrix against a table that is already loaded and indexed, use [retrieval-only-job.yaml](../infrastructure/aws/retrieval-only-job.yaml). It uses the same image, client resources and settings as the full study, so two runs differ only in database state. Copy it to `.local/`, fill the placeholders (account ID, image digest, Job name and a `DATABASE_CONFIG` label that names the database state), then apply it:
 
 ```bash
-psql "host=$PG_HOST port=5432 dbname=benchmark_results user=$PG_USER password=$PG_PASSWORD sslmode=require"
+cp infrastructure/aws/retrieval-only-job.yaml .local/retrieval-only-job.yaml
+# edit the placeholders in .local/retrieval-only-job.yaml
+kubectl -n benchmarks apply -f .local/retrieval-only-job.yaml
+kubectl -n benchmarks logs -f job/<job-name>
 ```
+
+For a short check first, lower `CONCURRENCY_LEVELS`, `TOP_K_VALUES` and `BENCHMARK_NUM_QUERIES` in the copy (for example `1`, `10` and `10`), then restore them for the full run.
+
+The full configuration sweeps concurrency `1,2,4,8,16,32,50,100` and top_k `1,5,10,20,50,100`, with 4,373 query rows per scenario. The three patterns are pure vector, metadata-filtered vector and hybrid vector/full-text search with reciprocal rank fusion. Inspect QPS, p50/p95/p99, timeouts and returned-row counts. A short result set is not a complete nearest-neighbour answer.
+
+The async benchmark sets `ef_search=max(HNSW_EF_SEARCH_MIN, top_k)`, default minimum 64, and defaults filtered searches to `hnsw.iterative_scan=strict_order`. The separate diagnostic sweep defaults to ef_search 40. Record these as distinct experiments; never combine their thresholds into one results table without settings.
+
+## 6a. Reproduce both database states: with and without filter statistics
+
+The article compares two states of the same table, data and indexes. They differ only in whether PostgreSQL has statistics for the expression `metadata->>'book_name'`. PostgreSQL collects those statistics only when `ANALYZE` runs **after** the expression index exists. `CREATE INDEX` does not collect them, and autovacuum's own `ANALYZE` usually ran during the insert, before the index existed.
+
+**Trap state** (what a load followed by `CREATE INDEX` leaves behind): drop and recreate only the metadata B-tree. It builds in about a second.
 
 ```sql
-CREATE TABLE IF NOT EXISTS benchmark_insert_summary (
-    id serial PRIMARY KEY,
-    run_timestamp timestamp DEFAULT CURRENT_TIMESTAMP,
-    database_name varchar(100),
-    test_location varchar(100),
-    dataset_size int,
-    database_config text,
-    total_records int,
-    batch_size int,
-    num_batches int,
-    total_time_seconds float,
-    throughput_vectors_per_sec float,
-    avg_batch_time_seconds float,
-    median_batch_time_seconds float,
-    min_batch_time_seconds float,
-    max_batch_time_seconds float
-);
-
-CREATE TABLE IF NOT EXISTS benchmark_index_summary (
-    id serial PRIMARY KEY,
-    run_timestamp timestamp DEFAULT CURRENT_TIMESTAMP,
-    database_name varchar(100),
-    test_location varchar(100),
-    dataset_size int,
-    database_config text,
-    index_type varchar(50),
-    index_parameters jsonb,
-    table_row_count int,
-    total_build_time_seconds float,
-    notes text
-);
-
-CREATE TABLE IF NOT EXISTS benchmark_retrieval_summary (
-    id serial PRIMARY KEY,
-    run_timestamp timestamp DEFAULT CURRENT_TIMESTAMP,
-    database_name varchar(100),
-    test_location varchar(100),
-    dataset_size int,
-    database_config text,
-    test_type varchar(50),
-    index_type varchar(50),
-    top_k int,
-    concurrency_level int,
-    total_queries int,
-    total_duration_seconds float,
-    qps float,
-    avg_latency_seconds float,
-    p50_latency_seconds float,
-    p95_latency_seconds float,
-    p99_latency_seconds float
-);
+DROP INDEX wot_chunks_2_5m_expr_idx;
+CREATE INDEX wot_chunks_2_5m_expr_idx ON wot_chunks_2_5m ((metadata->>'book_name'));
+-- Verify: 0 rows, and EXPLAIN on a book filter shows rows=12500 (0.5% of 2.5M)
+SELECT * FROM pg_stats WHERE tablename = 'wot_chunks_2_5m_expr_idx';
 ```
 
----
-
-## 7. Running Benchmarks
-
-All benchmarks are executed as Kubernetes Jobs using Helm. Ensure you are on the correct context:
-
-```bash
-kubectl config use-context benchmark-execution-aks
-```
-
-### Common Variables
-
-```bash
-export ACR_NAME="<your-acr-name>"
-export IMAGE_NAME="benchmark-engine"
-export TAG="v5.2.8-wot-8rep"
-export NAMESPACE="default"
-```
-
-### CNPG pgvector - WoT 100K Vectors
-
-**Prerequisites:**
-
-- CNPG cluster running with LoadBalancer exposed (see [CNPG_PGVECTOR_SETUP.md](./CNPG_PGVECTOR_SETUP.md))
-- `cnpg-pgvector-secrets` created on `benchmark-execution-aks` with `PG_HOST` (LoadBalancer IP) and `PG_PASSWORD`
-- `pg-results-secrets` exists for results database
-
-> **Architecture:** CNPG runs on a dedicated AKS cluster (`aks-cnpg-pgvector`, Standard_D16s_v3 16vCPU/64GB). Benchmark jobs connect via the LoadBalancer external IP over TLS.
-
-**Insert**
-
-```bash
-helm uninstall cnpg-pg-insert-wot -n $NAMESPACE --ignore-not-found && \
-helm install cnpg-pg-insert-wot ./kube/charts/benchmark-engine \
-    -n $NAMESPACE \
-    -f kube/charts/benchmark-engine/examples/insert-cnpg-pgvector.yaml \
-    --set image.repository=$ACR_NAME.azurecr.io/$IMAGE_NAME \
-    --set image.tag=$TAG
-```
-
-**Index Creation**
-
-```bash
-helm uninstall cnpg-pg-index-wot -n $NAMESPACE --ignore-not-found && \
-helm install cnpg-pg-index-wot ./kube/charts/benchmark-engine \
-    -n $NAMESPACE \
-    -f kube/charts/benchmark-engine/examples/index-cnpg-pgvector.yaml \
-    --set image.repository=$ACR_NAME.azurecr.io/$IMAGE_NAME \
-    --set image.tag=$TAG
-```
-
-**Retrieval Benchmark (asyncpg)**
-
-```bash
-helm uninstall cnpg-pg-retrieval-asyncpg-wot -n $NAMESPACE --ignore-not-found && \
-helm install cnpg-pg-retrieval-asyncpg-wot ./kube/charts/benchmark-engine \
-    -n $NAMESPACE \
-    -f kube/charts/benchmark-engine/examples/retrieval-cnpg-pgvector-asyncpg.yaml \
-    --set image.repository=$ACR_NAME.azurecr.io/$IMAGE_NAME \
-    --set image.tag=$TAG
-```
-
-### CNPG pgvector - WoT 2.5M Vectors
-
-**Prerequisites:**
-
-- 100K benchmark completed first (to validate connectivity)
-- `cnpg-pgvector-secrets` and `pg-results-secrets` exist on `benchmark-execution-aks`
-- 2.5M dataset generated and uploaded to Azure Files (see Section 4)
-
-> Uses chunked loading (`INSERT_CHUNK_SIZE: "100000"`) to stream data from disk in 100K-row chunks, keeping memory under 8GB.
-
-**Insert (COPY Binary -- recommended for 2.5M)**
-
-```bash
-helm uninstall cnpg-pg-insert-copy-wot-2m5 -n $NAMESPACE --ignore-not-found && \
-helm install cnpg-pg-insert-copy-wot-2m5 ./kube/charts/benchmark-engine \
-    -n $NAMESPACE \
-    -f kube/charts/benchmark-engine/examples/insert-cnpg-pgvector-copy.yaml \
-    --set image.repository=$ACR_NAME.azurecr.io/$IMAGE_NAME \
-    --set image.tag=$TAG
-```
-
-**Insert (Standard INSERT -- slower, for fair cross-DB comparison)**
-
-```bash
-helm uninstall cnpg-pg-insert-wot-2m5 -n $NAMESPACE --ignore-not-found && \
-helm install cnpg-pg-insert-wot-2m5 ./kube/charts/benchmark-engine \
-    -n $NAMESPACE \
-    -f kube/charts/benchmark-engine/examples/insert-cnpg-pgvector.yaml \
-    --set image.repository=$ACR_NAME.azurecr.io/$IMAGE_NAME \
-    --set image.tag=$TAG
-```
-
-**Index Creation**
-
-```bash
-helm uninstall cnpg-pg-index-wot-2m5 -n $NAMESPACE --ignore-not-found && \
-helm install cnpg-pg-index-wot-2m5 ./kube/charts/benchmark-engine \
-    -n $NAMESPACE \
-    -f kube/charts/benchmark-engine/examples/index-cnpg-pgvector.yaml \
-    --set image.repository=$ACR_NAME.azurecr.io/$IMAGE_NAME \
-    --set image.tag=$TAG
-```
-
-**Retrieval Benchmark (asyncpg)**
-
-```bash
-helm uninstall cnpg-pg-retrieval-asyncpg-wot-2m5 -n $NAMESPACE --ignore-not-found && \
-helm install cnpg-pg-retrieval-asyncpg-wot-2m5 ./kube/charts/benchmark-engine \
-    -n $NAMESPACE \
-    -f kube/charts/benchmark-engine/examples/retrieval-cnpg-pgvector-asyncpg.yaml \
-    --set image.repository=$ACR_NAME.azurecr.io/$IMAGE_NAME \
-    --set image.tag=$TAG
-```
-
-### Monitor Progress
-
-```bash
-kubectl get jobs -n $NAMESPACE -w
-kubectl get pods -n $NAMESPACE -l app=benchmark-engine
-kubectl logs -f <pod-name> -n $NAMESPACE
-```
-
-### Cleanup
-
-```bash
-helm uninstall <release-name> -n $NAMESPACE
-```
-
----
-
-## 8. Viewing Results
-
-### Query Results via psql
-
-```bash
-export $(grep -v '^#' .env.azure | xargs)
-PGSSLMODE=require PGDATABASE=benchmark_results psql
-```
-
-**Retrieval results:**
+**Fixed state:**
 
 ```sql
-SELECT database_name, test_type, top_k, concurrency_level,
-       ROUND(avg_latency_seconds::numeric * 1000, 2) as avg_latency_ms,
-       ROUND(p99_latency_seconds::numeric * 1000, 2) as p99_latency_ms,
-       ROUND(qps::numeric, 2) as qps
-FROM benchmark_retrieval_summary
-WHERE database_name LIKE '%CNPG%'
-ORDER BY id DESC
-LIMIT 20;
+ANALYZE wot_chunks_2_5m;
+-- Verify: one row with n_distinct = 16
+SELECT attname, n_distinct FROM pg_stats WHERE tablename = 'wot_chunks_2_5m_expr_idx';
 ```
 
-**Insert results:**
+Nothing writes to the table after loading, so autovacuum does not re-analyze it and the trap state persists until you run `ANALYZE`. Check `pg_stats` before every measurement anyway.
 
-```sql
-SELECT database_name, dataset_size, total_records,
-       ROUND(total_time_seconds::numeric, 2) as total_time_s,
-       ROUND(throughput_vectors_per_sec::numeric, 2) as vectors_per_sec
-FROM benchmark_insert_summary
-WHERE database_name LIKE '%CNPG%'
-ORDER BY id DESC;
-```
-
-**Index creation results:**
-
-```sql
-SELECT database_name, index_type, index_parameters,
-       table_row_count,
-       ROUND(total_build_time_seconds::numeric, 2) as build_time_s
-FROM benchmark_index_summary
-WHERE database_name LIKE '%CNPG%'
-ORDER BY id DESC;
-```
-
-### Plot Results
-
-Use the plotting script to generate publication-quality charts:
+Run the diagnostics in each state and compare:
 
 ```bash
-# Requires matplotlib, pandas, psycopg2-binary
-export $(grep -v '^#' .env.azure | xargs)
-uv run python scripts/plot_article_benchmarks.py
+# Through the vector port-forward (127.0.0.1:15432), or with kubectl exec into the database pod
+psql -h 127.0.0.1 -p 15432 -U benchmark_user -d benchmark_vectors -f scripts/diagnose_statistics_trap.sql
+psql -h 127.0.0.1 -p 15432 -U benchmark_user -d benchmark_vectors -f scripts/diagnose_hybrid_components.sql
+# Fixed state only; creates and drops an extended statistics object
+psql -h 127.0.0.1 -p 15432 -U benchmark_user -d benchmark_vectors -f scripts/diagnose_compound_filter_statistics.sql
 ```
 
-This produces charts in `doc/plots/` showing QPS and latency across all search scenarios, top_k values, and concurrency levels.
+To rerun the retrieval matrix against an already loaded table, without reloading or rebuilding the HNSW index, use [retrieval-only-job.yaml](../infrastructure/aws/retrieval-only-job.yaml). It uses the same image, client resources and settings as the full study. Fill its placeholders, including a `DATABASE_CONFIG` label that names the database state, then apply it:
 
----
+```bash
+kubectl -n benchmarks apply -f .local/retrieval-only-job.yaml
+kubectl -n benchmarks logs -f job/<job-name>
+```
 
-## Quick Reference: CNPG Benchmark Files
+In the trap state, filtered searches at top_k 50 and 100 use the bitmap plan, and many queries exceed the harness's budget. Each query gets `POOL_ACQUIRE_TIMEOUT + QUERY_TIMEOUT + 10` = 160 seconds **from the moment the scenario submits it**, including time spent waiting for a concurrency slot. A scenario therefore ends after at most about 160 seconds. Queries that have not finished by then count as failed, and the stored latency percentiles describe the successful queries only. Read the Job log's `queries_failed` and `successful_queries` events together with the summary table.
 
-| Action               | Values File                                     | Notes                               |
-| -------------------- | ----------------------------------------------- | ----------------------------------- |
-| Insert (standard)    | `examples/insert-cnpg-pgvector.yaml`            | Row-by-row INSERT                   |
-| Insert (COPY binary) | `examples/insert-cnpg-pgvector-copy.yaml`       | 10-50x faster, recommended for 2.5M |
-| Index creation       | `examples/index-cnpg-pgvector.yaml`             | HNSW + B-tree + GIN indexes         |
-| Retrieval (asyncpg)  | `examples/retrieval-cnpg-pgvector-asyncpg.yaml` | Vector, Filtered, Hybrid search     |
+## 7. Query results and use DBeaver locally
 
----
+Use the **`-rw` services** to reach each current primary; see [CNPG service semantics](https://cloudnative-pg.io/docs/current/service_management/). CNPG's `-r` service includes all instances; `-ro` targets replicas. Each database currently has one primary and no replicas, so use `-rw` for both DBeaver connections.
 
-## Troubleshooting
+Open two terminals from the repository root. Run the relevant command and keep each terminal open:
 
-| Issue                     | Symptom                              | Fix                                                                                         |
-| :------------------------ | :----------------------------------- | :------------------------------------------------------------------------------------------ |
-| **DB Connection Timeout** | Logs show `Connection timed out`     | Check Azure PostgreSQL Firewall rules. Whitelist the AKS outbound IP (see Section 5).       |
-| **OOMKilled**             | Pod status is `OOMKilled`            | Increase memory limits in the example YAML file (e.g., `memory: 8Gi`).                      |
-| **Image Pull Error**      | `ErrImagePull` or `ImagePullBackOff` | Verify `ACR_NAME` variable. Ensure `acr-secret` exists and the service account is patched.  |
-| **Results Not Saved**     | Benchmark runs but no results appear | Check `RESULTS_PG_DATABASE` is set. Verify `pg-results-secrets` contains valid credentials. |
-| **Query File Not Found**  | `FileNotFoundError` for parquet      | Ensure file is uploaded to Azure Files and PVC is mounted correctly.                        |
+```bash
+# Terminal 1: vector database
+kubectl --kubeconfig .local/kubeconfig -n cnpg-pgvector \
+  port-forward --address 127.0.0.1 svc/ml-pgvector-benchmark-rw 15432:5432
+```
+
+```bash
+# Terminal 2: results database
+kubectl --kubeconfig .local/kubeconfig -n benchmark-results \
+  port-forward --address 127.0.0.1 svc/benchmark-results-rw 15433:5432
+```
+
+In k9s, select the corresponding `-rw` service and press **Shift+F**. Choose local port `15432` for vectors and `15433` for results, forwarding remote port `5432`. Local ports must differ because both servers listen on remote port 5432. If a local port is occupied, select another unused port and use it in DBeaver. Reconnect the forward if its target pod is replaced.
+
+Create two **PostgreSQL** connections in DBeaver:
+
+| Field | Vector connection | Results connection |
+| --- | --- | --- |
+| Connection name | EKS vectors | EKS benchmark results |
+| Host | `127.0.0.1` | `127.0.0.1` |
+| Port | `15432` | `15433` |
+| Database | `benchmark_vectors` | `benchmark_results` |
+| User | `benchmark_user` | `results_user` |
+| Password Secret namespace | `cnpg-pgvector` | `benchmark-results` |
+| Password Secret name | `ml-pgvector-benchmark-app` | `benchmark-results-app` |
+| Secret field | `password` | `password` |
+| SSL mode | `require` | `require` |
+
+These are application-owner credentials; superuser access is unnecessary for the supplied inspection queries. CNPG's application Secrets also contain `username`, `dbname`, `host` and `port`. The `host` value is an internal service name: use `127.0.0.1` and the local forwarded port in DBeaver.
+
+On macOS, copy each decoded password directly into the clipboard and paste it into its DBeaver connection. The following commands do not print the password:
+
+```bash
+kubectl --kubeconfig .local/kubeconfig -n cnpg-pgvector \
+  get secret ml-pgvector-benchmark-app -o jsonpath='{.data.password}' \
+  | python3 -c 'import base64,sys; sys.stdout.write(base64.b64decode(sys.stdin.buffer.read()).decode())' \
+  | pbcopy
+```
+
+```bash
+kubectl --kubeconfig .local/kubeconfig -n benchmark-results \
+  get secret benchmark-results-app -o jsonpath='{.data.password}' \
+  | python3 -c 'import base64,sys; sys.stdout.write(base64.b64decode(sys.stdin.buffer.read()).decode())' \
+  | pbcopy
+```
+
+For another OS, omit `| pbcopy` to display the decoded password privately, or pipe into its clipboard utility. The copied benchmark-worker Secrets in namespace `benchmarks` contain the same connection credentials under `PG_*` (`cnpg-pgvector-secrets`) and `RESULTS_PG_*` (`pg-results-secrets`); use the original CNPG application Secrets above for DBeaver. Keep passwords out of screenshots and Git.
+
+In DBeaver's SSL settings, use PostgreSQL driver property `sslmode=require`, then **Test Connection**. If certificate verification is enabled separately, configure the CNPG CA and a certificate-matching service hostname; a certificate issued for cluster service names will not match `127.0.0.1`. Port-forwarding is local administrative access, not a public database endpoint.
+
+Open the appropriate file in an SQL editor attached to its connection:
+
+| File | Connection | Contents |
+| --- | --- | --- |
+| [inspect_vector_database.sql](../scripts/inspect_vector_database.sql) | Vectors | Runtime, estimated rows, table/TOAST/index sizes, index definitions/validity, active index/COPY progress, SQL sessions/blockers, index usage, this session's settings |
+| [inspect_benchmark_results.sql](../scripts/inspect_benchmark_results.sql) | Results | Study phase/settings/evidence, ingestion and index measurements, retrieval progress, per-scenario QPS/p50/p95/p99, missing/duplicate/short-query cases, all configurations including smoke |
+| [perf_audit_pgvector_2.5m_wot.sql](../scripts/perf_audit_pgvector_2.5m_wot.sql) | Vectors | Existing detailed metadata profiles, pure/filtered/hybrid searches, LIMIT sweeps, EXPLAIN plans, workarounds and recall experiments |
+
+Use **Ctrl+Enter** to run the current/selected statement, and keep auto-commit enabled for fresh monitoring snapshots. The two inspection files use read-only statements and avoid full-vector-table scans. The performance audit contains expensive queries, session-setting changes and temporary-table experiments: run selected sections after the timed study completes. It should not be executed wholesale while measuring the benchmark.
+
+`benchmark_study_runs.updated_at` changes at phase transitions, not continuously. Index summaries appear after each index commits; retrieval summaries appear after each scenario finishes. An empty retrieval result during index creation is expected. Failed-query and clipped-result diagnostics are in Job logs; the current summary schema does not persist returned-row counts. DBeaver's HNSW session settings do not reveal the worker connection's session overrides; consult the recorded study settings as well.
+
+## 8. Diagnostic sweeps and article charts
+
+Use the supplied diagnostic scripts inside the worker network or through the local port-forward. Shape private `.env.aws` from [example.env.aws](../example.env.aws). Source it using `set -a; source .env.aws; set +a` after checking its contents. The file remains ignored.
+
+```bash
+EF_SEARCH=40 uv run python scripts/cnpg_planner_tipping_point_all_books.py
+EF_SEARCH=100 uv run python scripts/cnpg_planner_tipping_point_all_books.py
+EF_SEARCH=200 uv run python scripts/cnpg_planner_tipping_point_all_books.py
+EF_SEARCH=400 uv run python scripts/cnpg_planner_tipping_point_all_books.py
+```
+
+Run the sweep in the database state you want to chart (section 6a); the article's cliff charts use the state without statistics. For filtered-search plans and hybrid query components, use the SQL diagnostics in section 6a.
+
+Use the **same query vector** when comparing adjacent LIMITs. Save the selected plan, cost, BUFFERS, execution time, returned rows, GUCs and cache state. The sweep overwrites its per-ef_search CSV filename; save each complete run under a dated evidence directory before another sweep. Results charts must be regenerated from recorded EKS data rather than edited to imply new measurements.
+
+```bash
+uv run python scripts/plot_article_benchmarks.py '<exact database_config from this run>'
+uv run python scripts/plot_tipping_point_article.py
+python scripts/sync_article.py
+```
+
+See [RUN_EVIDENCE.md](RUN_EVIDENCE.md) for the publication gate and [SCREENSHOT_PLAN.md](SCREENSHOT_PLAN.md) for the full AWS/Grafana/DBeaver capture list. The Medium draft retains the full canonical README; publication may need Markdown tables adapted to Medium's editor.
+
+## 9. Failure checks and cleanup
+
+- `Pending` PVC: confirm EBS CSI IAM/add-on health and a matching untainted/tolerated node in the volume's AZ.
+- `ImagePullBackOff`: verify ECR URI/tag, amd64 architecture, node-role ECR permissions and outbound DNS/network.
+- Connection failure: verify namespace DNS, CNPG readiness and distinct vector/results credentials.
+- Dataset failure: check URL expiry, source length, S3 permissions, worker memory and SHA-256 verification.
+- OOM: lower Parquet chunk size; avoid loading the 30.94 GB input (28.82 GiB) into RAM as one DataFrame.
+- Missing indexes: inspect index logs/catalogs, not only the Job exit status.
+- Slow retrieval: correlate the actual plan with I/O/cache/CPU. Do not assume every index scan is HNSW.
+
+Keep logs and result exports before deleting completed Jobs. Retain the dataset cache for repeated runs. Follow the setup guide's explicit teardown procedure when the investigation is complete.

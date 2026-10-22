@@ -11,9 +11,8 @@ Key differences from standard INSERT benchmark:
 - Direct data streaming to PostgreSQL
 - 10-50x faster than standard INSERT for bulk loading
 
-IMPORTANT: This benchmark is NOT directly comparable to MongoDB/Milvus/Azure
-standard insert benchmarks. Use 01_insert_benchmark.py for fair comparisons.
-This benchmark shows PostgreSQL's maximum bulk loading capability.
+This benchmark shows PostgreSQL's maximum bulk loading capability; it is not
+comparable to row-by-row INSERT throughput.
 
 Supports multiple datasets:
 - Aerospace faults dataset (legacy): barcode, description, registration_code, etc.
@@ -424,7 +423,6 @@ def main():
     logger.info("PostgreSQL pgvector Insert Benchmark - COPY Binary Format")
     logger.info("=" * 80)
     logger.info("NOTE: This benchmark uses COPY for maximum ingestion speed.")
-    logger.info("For fair comparison with other databases, use 01_insert_benchmark.py")
     logger.info("=" * 80)
 
     if INSERT_CHUNK_SIZE > 0:
@@ -476,7 +474,7 @@ def main():
                     database=common.PG_DATABASE)
 
         logger.info("test_init",
-                    database="Azure PostgreSQL (pgvector) - COPY BINARY",
+                    database="CNPG PostgreSQL (pgvector) - COPY BINARY",
                     batch_sizes=BATCH_SIZES)
 
         for batch_size in BATCH_SIZES:

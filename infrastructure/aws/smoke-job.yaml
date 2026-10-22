@@ -1,0 +1,33 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: eks-stack-smoke
+  namespace: benchmarks
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      nodeSelector: {workload: benchmarks}
+      tolerations:
+        - {key: workload, operator: Equal, value: benchmarks, effect: NoSchedule}
+      restartPolicy: Never
+      containers:
+        - name: smoke
+          image: <account-id>.dkr.ecr.ap-south-1.amazonaws.com/pgvector-investigation/benchmark-engine:eks-20261022.1
+          command: [python, /checks/smoke.py]
+          env:
+            - {name: RESULTS_PG_DATABASE, value: benchmark_results}
+          envFrom:
+            - secretRef: {name: cnpg-pgvector-secrets}
+            - secretRef: {name: pg-results-secrets}
+          resources:
+            requests: {cpu: "1", memory: 1Gi}
+            limits: {cpu: "2", memory: 4Gi}
+          volumeMounts:
+            - {name: data, mountPath: /app/data, readOnly: true}
+            - {name: checks, mountPath: /checks, readOnly: true}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: benchmark-dataset-pvc}
+        - name: checks
+          configMap: {name: eks-smoke-script}

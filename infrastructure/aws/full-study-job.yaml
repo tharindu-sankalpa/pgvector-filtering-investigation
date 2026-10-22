@@ -1,0 +1,36 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: <study-name>
+  namespace: benchmarks
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      nodeSelector: {workload: benchmarks}
+      tolerations:
+        - {key: workload, operator: Equal, value: benchmarks, effect: NoSchedule}
+      restartPolicy: Never
+      containers:
+        - name: study
+          image: <account-id>.dkr.ecr.ap-south-1.amazonaws.com/pgvector-investigation/benchmark-engine@<benchmark-digest>
+          command: [python, /study/full_study.py]
+          env:
+            - {name: RUN_ID, value: <run-id>}
+            - {name: BENCHMARK_IMAGE_DIGEST, value: <benchmark-digest>}
+            - {name: POSTGRES_IMAGE_DIGEST, value: <postgres-digest>}
+            - {name: RESULTS_PG_DATABASE, value: benchmark_results}
+          envFrom:
+            - secretRef: {name: cnpg-pgvector-secrets}
+            - secretRef: {name: pg-results-secrets}
+          resources:
+            requests: {cpu: "4", memory: 8Gi}
+            limits: {cpu: "6", memory: 24Gi}
+          volumeMounts:
+            - {name: data, mountPath: /app/data, readOnly: true}
+            - {name: study, mountPath: /study, readOnly: true}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: benchmark-dataset-pvc}
+        - name: study
+          configMap: {name: <study-name>}

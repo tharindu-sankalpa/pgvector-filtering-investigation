@@ -9,6 +9,7 @@
 
 prometheus:
   prometheusSpec:
+    nodeSelector: {workload: services}
     scrapeInterval: 15s
     evaluationInterval: 15s
 
@@ -29,7 +30,7 @@ prometheus:
     storageSpec:
       volumeClaimTemplate:
         spec:
-          storageClassName: managed-csi-premium
+          storageClassName: gp3
           accessModes: ["ReadWriteOnce"]
           resources:
             requests:
@@ -44,12 +45,16 @@ prometheus:
 # Grafana configuration
 grafana:
   enabled: true
+  nodeSelector: {workload: services}
   # Override in a private Helm values file; do not commit the real password.
-  adminPassword: "<set-a-unique-grafana-password>"
+  admin:
+    existingSecret: grafana-admin
+    userKey: admin-user
+    passwordKey: admin-password
 
   persistence:
     enabled: true
-    storageClassName: managed-csi-premium
+    storageClassName: gp3
     size: 10Gi
 
   # Port-forward only (no LoadBalancer to save public IPs)
@@ -101,3 +106,19 @@ prometheus-node-exporter:
 # Pushgateway (not needed)
 prometheus-pushgateway:
   enabled: false
+
+# Include dedicated tainted nodes in host metrics.
+prometheus-node-exporter:
+  prometheus:
+    monitor:
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node
+  tolerations:
+    - {operator: Exists, effect: NoSchedule}
+    - {operator: Exists, effect: NoExecute}
+kube-state-metrics:
+  nodeSelector: {workload: services}
+alertmanager:
+  alertmanagerSpec:
+    nodeSelector: {workload: services}

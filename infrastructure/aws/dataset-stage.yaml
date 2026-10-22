@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stage-datasets
+  namespace: benchmarks
+spec:
+  backoffLimit: 1
+  template:
+    spec:
+      serviceAccountName: benchmark-data-reader
+      nodeSelector: {workload: benchmarks}
+      tolerations:
+        - {key: workload, operator: Equal, value: benchmarks, effect: NoSchedule}
+      restartPolicy: Never
+      containers:
+        - name: stage
+          image: public.ecr.aws/aws-cli/aws-cli:2.31.21
+          command: [/bin/sh, -ec]
+          args:
+            - |
+              for file in gen_wot_2.5m.parquet wot_retrieval_queries.parquet; do
+                aws s3 cp "s3://${DATASET_BUCKET}/datasets/${file}" "/data/${file}.partial" --only-show-errors
+                mv "/data/${file}.partial" "/data/${file}"
+              done
+              aws s3 cp "s3://${DATASET_BUCKET}/datasets/SHA256SUMS" /data/SHA256SUMS --only-show-errors
+              cd /data
+              sha256sum -c SHA256SUMS
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: ap-south-1
+            - name: DATASET_BUCKET
+              value: <dataset-bucket>
+          resources:
+            requests: {cpu: 250m, memory: 256Mi}
+            limits: {cpu: "2", memory: 1Gi}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: data
+          persistentVolumeClaim: {claimName: benchmark-dataset-pvc}

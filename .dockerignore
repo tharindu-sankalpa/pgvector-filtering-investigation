@@ -1,0 +1,11 @@
+.git
+.venv
+.env*
+repos
+.local
+*.parquet
+*.epub
+doc/screenshots
+doc/linkedin
+__pycache__
+.aws

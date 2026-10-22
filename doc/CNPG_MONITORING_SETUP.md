@@ -1,168 +1,44 @@
-# CNPG PostgreSQL Monitoring Setup (Prometheus + Grafana)
+# PostgreSQL Monitoring on EKS: Prometheus and Grafana
 
-This guide sets up the same persistent observability stack used by the Milvus clusters, adapted for the CNPG PostgreSQL pgVector benchmarking cluster.
+This guide deploys the monitoring stack in the `monitoring` namespace of the same EKS cluster as the databases and benchmark Jobs. The detailed metrics explanations below remain the reference for interpreting the investigation.
 
-## Architecture
+## Deployment and verification
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│           CNPG AKS Cluster (aks-cnpg-pgvector)                      │
-│                                                                     │
-│  ┌─────────────────────────────────────────────────────────────┐   │
-│  │                 monitoring namespace                          │   │
-│  │  ┌────────────────────┐    ┌────────────────────────────┐   │   │
-│  │  │ Prometheus         │    │ Grafana                     │   │   │
-│  │  │ - 20Gi PVC         │◄───│ - 10Gi PVC                  │   │   │
-│  │  │ - 7d retention     │    │ - Port-forward access       │   │   │
-│  │  │ - Node exporter    │    │ - Auto-provisioned dashboard│   │   │
-│  │  │ - kube-state-metrics│    └────────────────────────────┘   │   │
-│  │  └─────────┬──────────┘                                      │   │
-│  └────────────┼─────────────────────────────────────────────────┘   │
-│               │ scrapes :9187                                        │
-│  ┌────────────▼─────────────────────────────────────────────────┐   │
-│  │                 cnpg-pgvector namespace                        │   │
-│  │  ┌──────────────────────────────────────────────────────────┐│   │
-│  │  │ ml-pgvector-benchmark-1 (PostgreSQL + pgVector)          ││   │
-│  │  │ - Built-in CNPG metrics exporter (:9187/metrics)         ││   │
-│  │  │ - PodMonitor auto-discovered by Prometheus               ││   │
-│  │  │ - Custom queries: cache hit, connections, locks, WAL     ││   │
-│  │  └──────────────────────────────────────────────────────────┘│   │
-│  └──────────────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────────────┘
-```
-
-## Prerequisites
-
-- `aks-cnpg-pgvector` cluster running with CNPG PostgreSQL deployed
-- `kubectl` configured with `aks-cnpg-pgvector` context
-- `helm` 3.x installed
-
-## Step 1: Switch to CNPG Cluster
+Complete [cluster setup](CNPG_PGVECTOR_SETUP.md). The `workloads` phase deploys the monitoring chart, a generated Grafana credential Secret, the custom query ConfigMap, PodMonitor, and dashboard ConfigMap. It records chart versions under `.local/chart-versions.json`.
 
 ```bash
-kubectl config use-context aks-cnpg-pgvector
-kubectl config current-context
-# Should show: aks-cnpg-pgvector
-```
-
-## Step 2: Add Helm Repos
-
-```bash
-helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo update
-```
-
-## Step 3: Deploy Prometheus + Grafana Stack
-
-This uses the same `kube-prometheus-stack` chart as the Milvus clusters, with persistent storage that survives cluster stop/start.
-
-```bash
-# Create monitoring namespace
-kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
-
-# Install the stack
-helm upgrade --install prometheus prometheus-community/kube-prometheus-stack \
-    --namespace monitoring \
-    -f infrastructure/cnpg-pgvector/monitoring/values-prometheus-grafana.yaml \
-    --wait --timeout 10m
-```
-
-### Verify Deployment
-
-```bash
-# Check all pods are running
-kubectl get pods -n monitoring
-# Expected:
-#   prometheus-kube-prometheus-operator-xxx     Running
-#   prometheus-prometheus-kube-prometheus-prometheus-0  Running
-#   prometheus-grafana-xxx                      Running
-#   prometheus-kube-state-metrics-xxx           Running
-#   prometheus-prometheus-node-exporter-xxx     Running
-
-# Verify PVCs are bound (persistent storage)
-kubectl get pvc -n monitoring
-# Expected:
-#   prometheus-prometheus-kube-prometheus-prometheus-db-...  Bound  20Gi
-#   prometheus-grafana                                      Bound  10Gi
-```
-
-## Step 4: Deploy CNPG Monitoring Resources
-
-Apply the custom PostgreSQL metrics ConfigMap, the manual PodMonitor, and update the CNPG cluster.
-
-> **Note:** CNPG 1.28+ deprecated `spec.monitoring.enablePodMonitor`. We create a PodMonitor resource manually instead (see `cnpg-podmonitor.yaml`).
-
-```bash
-# Apply the custom queries ConfigMap
-kubectl apply -f infrastructure/cnpg-pgvector/monitoring/cnpg-extra-monitoring.yaml
-
-# Create the PodMonitor (tells Prometheus to scrape CNPG pod :9187/metrics)
-kubectl apply -f infrastructure/cnpg-pgvector/monitoring/cnpg-podmonitor.yaml
-
-# Update the CNPG cluster to reference custom queries
-kubectl apply -f infrastructure/cnpg-pgvector/cluster.yaml
-```
-
-### Verify CNPG Metrics Export
-
-```bash
-# Check PodMonitor was created
+export KUBECONFIG="$PWD/.local/kubeconfig"
+uv run python scripts/aws/deploy.py workloads
+kubectl get pods,pvc -n monitoring
 kubectl get podmonitor -n cnpg-pgvector
-# Should show: ml-pgvector-benchmark
-
-# Port-forward to verify metrics endpoint directly
-kubectl port-forward -n cnpg-pgvector pod/ml-pgvector-benchmark-1 9187:9187 &
-
-# Scrape metrics (in another terminal or after backgrounding)
-curl -s http://localhost:9187/metrics | head -50
-# Should show cnpg_* metrics
-
-# Kill the port-forward
-kill %1
+kubectl get configmap cnpg-dashboard -n monitoring
 ```
 
-## Step 5: Import Grafana Dashboard
+Prometheus uses 20 GiB encrypted EBS gp3, seven-day retention, and a 15-second scrape interval. Grafana uses 10 GiB encrypted EBS. The monitoring workloads are placed on the `services` node group. The dashboard selects the vector database node instead of combining all nodes. Node-exporter adds the Kubernetes node label to each target. Setting panels convert PostgreSQL units to bytes: 8 KiB blocks for shared_buffers/effective_cache_size/wal_buffers, 1 KiB for work_mem.
+
+The node-exporter DaemonSet must tolerate the dedicated database and benchmark node taints to measure those nodes.
+
+The custom queries are in [cnpg-extra-monitoring.yaml](../infrastructure/cnpg-pgvector/monitoring/cnpg-extra-monitoring.yaml). The manual [PodMonitor](../infrastructure/cnpg-pgvector/monitoring/cnpg-podmonitor.yaml) scrapes port 9187. Dashboard configuration is [cnpg-pgvector-overview.json](../infrastructure/cnpg-pgvector/monitoring/dashboards/cnpg-pgvector-overview.json).
+
+## Access the user interfaces
+
+Run each port-forward in a separate terminal. All interfaces bind locally.
 
 ```bash
-# Create the dashboard ConfigMap (auto-loaded by Grafana sidecar)
-kubectl create configmap cnpg-pgvector-dashboard \
-    --namespace monitoring \
-    --from-file=cnpg-pgvector-overview.json=infrastructure/cnpg-pgvector/monitoring/dashboards/cnpg-pgvector-overview.json \
-    --dry-run=client -o yaml | kubectl label --local -f - grafana_dashboard=1 -o yaml | kubectl apply -f -
+kubectl -n monitoring port-forward svc/prometheus-grafana 3000:80
+kubectl -n monitoring port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090
+kubectl -n cnpg-pgvector port-forward pod/ml-pgvector-benchmark-1 9187:9187
 ```
 
-## Step 6: Access Grafana
+Open Grafana at `http://localhost:3000` and Prometheus targets at `http://localhost:9090/targets`. Retrieve the generated Grafana password privately from the `grafana-admin` Secret; never capture its value in a screenshot or commit it. Select **CNPG pgVector Benchmark Overview** in Grafana.
 
-Since we use ClusterIP (to save public IPs), access Grafana via port-forward:
+Verify the CNPG target is UP and that node-exporter targets cover **all three node groups**. Confirm the dashboard shows the actual PostgreSQL version, pod allocation, and vector-table size. No metric panel is evidence of an HNSW scan by itself: correlate scan counters with saved EXPLAIN plans. Table-level index counters include B-tree scans too.
 
-```bash
-# Port-forward Grafana to localhost:3000
-kubectl port-forward svc/prometheus-grafana -n monitoring 3000:80
-```
+## Capturing measurements
 
-Then open `http://localhost:3000` in your browser.
+Record the UTC start/end of every benchmark stage. Capture CPU, memory, I/O, buffer cache, scan counters, WAL, and connections over the same time range. Use a consistent dashboard time window and export PNGs only after labels and units have been checked. Follow [SCREENSHOT_PLAN.md](SCREENSHOT_PLAN.md).
 
-**Credentials:**
-- Username: `admin`
-- Password: the unique password you supply when deploying Grafana. The committed values file contains a placeholder; supply the real value through a private Helm values file kept outside this repository.
-
-Navigate to **Dashboards** → find **"CNPG pgVector Benchmark Overview"**.
-
-## Step 7: Verify Prometheus Targets
-
-Access Prometheus UI to verify all targets are being scraped:
-
-```bash
-# Port-forward Prometheus
-kubectl port-forward svc/prometheus-kube-prometheus-prometheus -n monitoring 9090:9090
-```
-
-Open `http://localhost:9090/targets` and verify:
-- `podMonitor/cnpg-pgvector/ml-pgvector-benchmark` → State: UP
-- `serviceMonitor/monitoring/...node-exporter` → State: UP
-- `serviceMonitor/monitoring/...kube-state-metrics` → State: UP
-
----
+Example values in the interpretation reference are explanatory targets or retained observations, not fresh EKS measurements. Replace them only from recorded evidence.
 
 ## Dashboard Reference: Metrics & Interpretation Guide
 
@@ -175,7 +51,7 @@ Quick-glance stat panels that provide immediate health assessment.
 | Panel | Metric Source | What It Shows | What to Watch For |
 |-------|--------------|---------------|-------------------|
 | **PostgreSQL** | `cnpg_collector_up` | Whether PostgreSQL is responsive (1=UP, 0=DOWN) | Should always be 1 during benchmarks. 0 means the pod crashed or OOM-killed. |
-| **PG Version** | `cnpg_collector_postgres_version` | PostgreSQL version (18.1) | Informational. Confirms pgVector 0.8.1 compatible version. |
+| **PG Version** | `cnpg_collector_postgres_version` | PostgreSQL version (18.6) | Informational. Confirms pgVector 0.8.7 compatible version. |
 | **DB Size** | `cnpg_pg_database_size_bytes` | Disk space consumed by `benchmark_vectors` database | ~1.7GB at 100K rows, ~40GB at 2.5M rows. Watch for unexpected growth. |
 | **Cache Hit Ratio** | `cnpg_pg_cache_hit_ratio_ratio` | Fraction of data reads served from shared_buffers vs disk | **Below 95% = critical bottleneck.** At 100K it should be ~100%. At 2.5M, if it drops significantly, `shared_buffers` needs increasing or read replicas can distribute load. |
 | **Active Backends** | `cnpg_backends_total` | Number of PostgreSQL backends (connections) actively serving the benchmark DB | Compare against `max_connections` (200). If approaching 150+, consider PgBouncer connection pooling. |
@@ -183,13 +59,13 @@ Quick-glance stat panels that provide immediate health assessment.
 | **WAL Buffer Full** | `cnpg_collector_wal_buffers_full` | Cumulative count of times WAL data was flushed because `wal_buffers` was full | High values mean backends stall waiting for WAL I/O. Current value of 50K+ after inserts suggests `wal_buffers` (64MB) may need increasing. |
 | **Temp Files Written** | `cnpg_pg_stat_database_temp_bytes` | Total bytes spilled to temporary files (when `work_mem` is exceeded) | **Non-zero = memory pressure.** PostgreSQL couldn't fit sort/hash operations in `work_mem` (256MB) and had to use disk. Increase `work_mem` for better query performance. |
 
-### Row 2: Node Resources (Standard_D16s_v3 — 16 vCPU, 64GB)
+### Row 2: Node Resources (m6i.4xlarge — 16 vCPU, 64GB)
 
 Infrastructure-level metrics from the Kubernetes node running the CNPG pod.
 
 | Panel | Metric Source | What It Shows | What to Watch For |
 |-------|--------------|---------------|-------------------|
-| **Node CPU by Mode** | `node_cpu_seconds_total` (stacked by mode) | CPU time split into: **User** (application code), **System** (kernel), **I/O Wait** (blocked on disk), **Steal** (VM hypervisor), **Idle** | **Key investigation panel.** If user+system stays at 30-40% during max concurrency retrieval (same as Azure managed PG), it confirms the CPU underutilization problem is inherent to pgVector's single-threaded HNSW scan, not Azure PG infrastructure. **High iowait** = disk is the bottleneck. **High steal** = noisy neighbor or VM throttling. |
+| **Node CPU by Mode** | `node_cpu_seconds_total` (stacked by mode) | CPU time split into: **User** (application code), **System** (kernel), **I/O Wait** (blocked on disk), **Steal** (VM hypervisor), **Idle** | **Key investigation panel.** If user+system stays at 30-40% during max concurrency retrieval (same as AWS managed PG), it confirms the CPU underutilization problem is inherent to pgVector's single-threaded HNSW scan, not AWS PG infrastructure. **High iowait** = disk is the bottleneck. **High steal** = noisy neighbor or VM throttling. |
 | **Node Memory Breakdown** | `node_memory_*` | Total RAM split into: Used, Page Cache, Buffers, Available | The **Page Cache** line is critical — it represents the OS filesystem cache that PostgreSQL uses beyond `shared_buffers` for `effective_cache_size`. At 2.5M scale, if Available drops near zero, the node needs more RAM or fewer pods. |
 
 ### Row 3: PostgreSQL Pod Resources (vs Limits)
@@ -198,7 +74,7 @@ Container-level metrics showing actual resource consumption against Kubernetes r
 
 | Panel | Metric Source | What It Shows | What to Watch For |
 |-------|--------------|---------------|-------------------|
-| **Pod CPU Usage vs Limits** | `container_cpu_usage_seconds_total`, `kube_pod_container_resource_limits` | CPU cores consumed by the PG pod vs the 8-core request / 16-core limit | If CPU stays at 5-6 cores (30-40%) during concurrent retrieval at concurrency=32, it proves pgVector HNSW index scan doesn't parallelize. This is the exact same pattern seen on Azure managed PG. Adding more CPU won't help — read replicas would, by spreading queries across pods. |
+| **Pod CPU Usage vs Limits** | `container_cpu_usage_seconds_total`, `kube_pod_container_resource_limits` | CPU cores consumed by the PG pod vs the 8-core request / 16-core limit | If CPU stays at 5-6 cores (30-40%) during concurrent retrieval at concurrency=32, it proves pgVector HNSW index scan doesn't parallelize. This is the exact same pattern seen on AWS managed PG. Adding more CPU won't help — read replicas would, by spreading queries across pods. |
 | **Pod Memory Usage vs Limits** | `container_memory_working_set_bytes`, `container_memory_rss`, `kube_pod_container_resource_limits` | Memory consumption vs the 64Gi limit | **Working set** = currently active memory. **RSS** = total resident memory. If working set approaches the limit, the pod will be OOM-killed. At 2.5M scale, watch for memory pressure from: `shared_buffers` (4GB) + `work_mem` × concurrent_queries (256MB × 32 = 8GB) + OS overhead. |
 
 ### Row 4: Query & Index Performance (Filtered/Hybrid Search Investigation)
@@ -520,14 +396,14 @@ curl -s http://localhost:9187/metrics > /tmp/cnpg-metrics.txt
 
 ## Persistence Across Cluster Stop/Start
 
-Both Prometheus and Grafana use Azure Premium SSD PVCs:
+Both Prometheus and Grafana use AWS Premium SSD PVCs:
 
 | Component | PVC Size | Storage Class | Retention |
 |-----------|----------|---------------|-----------|
-| Prometheus | 20Gi | managed-csi-premium | 7 days |
-| Grafana | 10Gi | managed-csi-premium | Persistent |
+| Prometheus | 20Gi | gp3 | 7 days |
+| Grafana | 10Gi | gp3 | Persistent |
 
-When you stop the AKS cluster (`az aks stop`), the PVCs are retained. When you start it again (`az aks start`), Prometheus and Grafana resume with all historical data and dashboards intact.
+EKS has no cluster stop/start operation. Scaling worker node groups to zero leaves control-plane charges and retained EBS charges. EBS data survives pod replacement in the same AZ; deleting or recreating the cluster requires explicit volume recovery. Export important evidence before teardown.
 
 ## Cleanup
 

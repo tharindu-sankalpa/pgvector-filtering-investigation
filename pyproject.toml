@@ -17,3 +17,12 @@ dependencies = [
     "matplotlib>=3.10.8",
     "pyyaml>=6.0.0",
 ]
+
+[dependency-groups]
+aws = [
+    "boto3==1.43.117",
+    "requests==2.34.2",
+]
+dev = [
+    "pytest>=9.1.1",
+]

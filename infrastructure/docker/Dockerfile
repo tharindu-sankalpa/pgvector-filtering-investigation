@@ -12,11 +12,13 @@ COPY pyproject.toml uv.lock ./
 
 # Install dependencies
 # We use --frozen to ensure strict adherence to lock file
-RUN uv sync --frozen --no-install-project
+RUN uv sync --frozen --no-install-project --no-dev
 
 # Copy the rest of the project
 # We copy src specifically as they are the entry points
 COPY src/ ./src/
+COPY scripts/ ./scripts/
+COPY data/*.yaml ./data/
 COPY README.md .
 
 # Create directory for data mount
@@ -28,7 +30,7 @@ RUN ls -la /app/src
 
 # Set the environment variable for python path
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app:/app/src
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Default command (can be overridden by Kubernetes Job)

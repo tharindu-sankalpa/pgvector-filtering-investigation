@@ -1,0 +1,24 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: benchmark-results
+  namespace: benchmark-results
+spec:
+  instances: 1
+  imageName: ghcr.io/cloudnative-pg/postgresql:18.6-system-trixie@sha256:f7e00138159bb45d70b624ba25e446924cb3ed1bf366d13e936c3f81b914064e
+  bootstrap:
+    initdb:
+      database: benchmark_results
+      owner: results_user
+  postgresql:
+    parameters:
+      shared_buffers: 256MB
+      max_connections: "100"
+  storage:
+    size: 20Gi
+    storageClass: gp3
+  resources:
+    requests: {cpu: 250m, memory: 512Mi}
+    limits: {cpu: "1", memory: 1Gi}
+  affinity:
+    nodeSelector: {workload: services}
