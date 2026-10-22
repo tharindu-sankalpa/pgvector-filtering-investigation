@@ -9,7 +9,7 @@ Replicates the Streamlit dashboard retrieval tab layout:
 
 To find available database configurations:
     1. Export environment variables:
-       export $(grep -v '^#' .env.azure | xargs)
+       export $(grep -v '^#' .env.aws | xargs)
        
     2. Connect to the results database using pg_cli:
        PGSSLMODE=require PGHOST=$PG_HOST PGUSER=$PG_USER PGPASSWORD=$PG_PASSWORD PGDATABASE=benchmark_results psql
@@ -20,11 +20,11 @@ To find available database configurations:
        WHERE database_name = 'PostgreSQL CNPG Self-Hosted';
 
 Usage:
-    export $(grep -v '^#' .env.azure | xargs)
+    export $(grep -v '^#' .env.aws | xargs)
     uv run python scripts/plot_article_benchmarks.py "<target_database_config>"
 
     Example:
-    uv run python scripts/plot_article_benchmarks.py "D16s_v3 16vCPU 64GB | asyncpg - WoT Dataset 2.5M"
+    uv run python scripts/plot_article_benchmarks.py "m6i.4xlarge 16vCPU 64GiB | asyncpg - WoT Dataset 2.5M"
 
 Output:
     doc/plots/article_cnpg_retrieval_<slugified_config>.png
@@ -51,13 +51,14 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_PG_HOST = os.getenv("RESULTS_PG_HOST", os.getenv("PG_HOST", os.getenv("PGHOST", "")))
 RESULTS_PG_USER = os.getenv("RESULTS_PG_USER", os.getenv("PG_USER", os.getenv("PGUSER", "")))
 RESULTS_PG_PASSWORD = os.getenv("RESULTS_PG_PASSWORD", os.getenv("PG_PASSWORD", os.getenv("PGPASSWORD", "")))
+RESULTS_PG_PORT = os.getenv("RESULTS_PG_PORT", "5432")
 RESULTS_PG_DATABASE = "benchmark_results"
 
 
 def fetch_cnpg_results(database_config: str = None) -> pd.DataFrame:
     """Fetch CNPG 2.5M retrieval results, picking the latest run per scenario."""
     conninfo = (
-        f"host={RESULTS_PG_HOST} "
+        f"host={RESULTS_PG_HOST} port={RESULTS_PG_PORT} "
         f"user={RESULTS_PG_USER} "
         f"password={RESULTS_PG_PASSWORD} "
         f"dbname={RESULTS_PG_DATABASE} "

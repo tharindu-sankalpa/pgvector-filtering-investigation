@@ -19,7 +19,7 @@ Environment Variables:
                  for smallest, middle, largest). If empty, tests all 16 books.
 
 Usage:
-    export $(grep -v '^#' .env.azure | xargs)
+    export $(grep -v '^#' .env.aws | xargs)
 
     # Default ef_search=40
     uv run python scripts/cnpg_planner_tipping_point_all_books.py
@@ -55,7 +55,7 @@ logger = setup_structlog()
 
 
 # ---------------------------------------------------------------------------
-# Connection parameters — sourced from .env.azure
+# Connection parameters — sourced from .env.aws
 # ---------------------------------------------------------------------------
 PG_HOST = os.getenv("CNPG_PG_HOST", "localhost")
 PG_PORT = int(os.getenv("CNPG_PG_PORT", "5432"))
@@ -576,7 +576,7 @@ def main() -> None:
     logger.info("=" * 70)
 
     if not PG_PASSWORD:
-        logger.error("missing_pg_password", hint="Load .env.azure")
+        logger.error("missing_pg_password", hint="Load .env.aws")
         sys.exit(1)
 
     # Step 1: Connect

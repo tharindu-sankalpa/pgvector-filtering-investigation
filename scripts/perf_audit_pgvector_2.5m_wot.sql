@@ -1,3 +1,13 @@
+-- START HERE: connect to benchmark_vectors (local port 15432).
+-- For current indexes, sizes, active SQL, COPY/index progress and session settings,
+-- open scripts/inspect_vector_database.sql first (lightweight read-only checks).
+-- For saved metrics and full-study phase, use scripts/inspect_benchmark_results.sql
+-- on the SEPARATE benchmark_results connection (local port 15433).
+-- Run selected statements, not this entire file: EXPLAIN ANALYZE actually executes
+-- searches; later sections change session settings and create/drop temp tables.
+-- Wait for the timed study to finish before running these experiments, so they
+-- do not change the benchmark's CPU, I/O or cache conditions.
+--
 -- ==============================================================================
 -- POSTGRESQL + PGVECTOR PERFORMANCE INVESTIGATION SCRIPTS
 -- ==============================================================================
@@ -553,7 +563,8 @@ WHERE metadata->>'book_name' = current_setting('myvars.filter_book_low')
 ORDER BY embedding <=> current_setting('myvars.embedding')::vector
 LIMIT 38;
 
--- "Bitmap Heap Scan" + "Sort" (brute-force) Execution Time: 41019.947 ms
+-- Without expression statistics this switches to "Bitmap Heap Scan" + "Sort" (brute-force).
+-- Measured timings for both database states: doc/results/eks-20261022-trap-no-stats.txt and eks-20261022-fixed-stats.txt.
 
 
 -- ----------------------------------------------------------------------------
@@ -607,9 +618,10 @@ SELECT id, 1 - (embedding <=> current_setting('myvars.embedding')::vector) AS si
 FROM wot_chunks_2_5m
 WHERE metadata->>'book_name' = current_setting('myvars.filter_book_high')
 ORDER BY embedding <=> current_setting('myvars.embedding')::vector
-LIMIT 38;
+LIMIT 40;
 
--- "Bitmap Heap Scan" + "Sort" (brute-force) Execution Time: 479739.632 ms
+-- Without expression statistics this switches to "Bitmap Heap Scan" + "Sort" (brute-force).
+-- Measured timings for both database states: doc/results/eks-20261022-trap-no-stats.txt and eks-20261022-fixed-stats.txt.
 
 
 -- ----------------------------------------------------------------------------
@@ -627,7 +639,7 @@ WHERE metadata->>'book_name'            = current_setting('myvars.filter_compoun
 ORDER BY embedding <=> current_setting('myvars.embedding')::vector
 LIMIT 5;
 
--- "Bitmap Heap Scan" + "Sort" (brute-force) Execution Time: 1920.700 ms
+-- Compound filter: compare the estimated and actual rows. See doc/results/eks-20261022-compound-filter.txt.
 
 EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
 SELECT id, 1 - (embedding <=> current_setting('myvars.embedding')::vector) AS similarity
@@ -637,7 +649,7 @@ WHERE metadata->>'book_name'            = current_setting('myvars.filter_compoun
 ORDER BY embedding <=> current_setting('myvars.embedding')::vector
 LIMIT 10;
 
--- "Bitmap Heap Scan" + "Sort" (brute-force) Execution Time: 1960.930 ms
+-- Compound filter: compare the estimated and actual rows. See doc/results/eks-20261022-compound-filter.txt.
 
 
 EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
@@ -902,7 +914,7 @@ LIMIT 50;
 -- 10.1. WORKAROUND: enable_bitmapscan = off
 -- Forces the planner away from Bitmap Heap Scan. It typically falls back to a
 -- regular B-tree index scan + sort — still brute-force, but avoids the bitmap path.
--- Expected outcome: ~800 ms (warm cache). Plan should NOT show "Bitmap Heap Scan".
+-- Measured without statistics: B-tree index scan + sort, ~340 ms (warm cache). Still brute force.
 -- ------------------------------------------------------------------------------
 
 SET enable_bitmapscan = off;
@@ -928,7 +940,8 @@ RESET enable_bitmapscan;
 -- Removes every alternative except the vector index. PostgreSQL treats enable_*
 -- settings as strong preferences, not hard constraints — it may still use a
 -- B-tree index scan if it calculates no viable alternative.
--- Expected outcome: ~818 ms. HNSW rarely chosen — planner overrides the hints.
+-- Measured without statistics: bitmap plan, ~360 ms. enable_indexscan = off also penalises
+-- the HNSW scan (it is an index scan), so this cannot force HNSW.
 -- ------------------------------------------------------------------------------
 
 SET enable_seqscan    = off;
@@ -957,8 +970,8 @@ RESET enable_indexscan;
 -- 10.3. WORKAROUND: hnsw.iterative_scan = relaxed_order
 -- Gives the HNSW index the mechanical ability to resume scanning in batches
 -- past the initial ef_search window. Solves the index-level limitation only.
--- Expected outcome: ~795 ms. Planner STILL chooses bitmap scan — iterative scan
--- never activates because it requires the planner to select HNSW first.
+-- Measured without statistics: bitmap plan, ~360 ms. Iterative scan never activates because
+-- it requires the planner to select HNSW first. After ANALYZE: HNSW, 50 rows, ~5 ms.
 -- ------------------------------------------------------------------------------
 
 SET hnsw.iterative_scan = relaxed_order;
@@ -983,7 +996,7 @@ RESET hnsw.iterative_scan;
 -- 10.4. WORKAROUND: iterative_scan + disable all other scan types
 -- Combines both approaches from 10.2 and 10.3. Even with no alternatives,
 -- the planner may still choose a B-tree index scan over the HNSW index.
--- Expected outcome: ~871 ms. Still no HNSW usage.
+-- Measured without statistics: bitmap plan, ~360 ms. Still no HNSW usage.
 -- ------------------------------------------------------------------------------
 
 SET hnsw.iterative_scan = relaxed_order;
@@ -1015,8 +1028,8 @@ RESET enable_indexscan;
 -- Strict ordering guarantees results in exact distance order; large ef_search
 -- gives the HNSW graph a wide enough candidate pool to find 50 filtered results.
 -- Still requires the planner to select HNSW — which it typically will not at LIMIT 50.
--- Expected outcome: ~795 ms (same as 10.3). The ef_search change is irrelevant
--- if the planner never enters the HNSW index.
+-- Measured without statistics: bitmap plan, ~360 ms, and the tipping point drops to LIMIT 33.
+-- The ef_search change is irrelevant if the planner never enters the HNSW index.
 -- ------------------------------------------------------------------------------
 
 SET hnsw.iterative_scan = strict_order;
@@ -1045,7 +1058,8 @@ RESET hnsw.ef_search;
 -- the planner always chooses HNSW. The metadata filter is applied AFTER the HNSW
 -- results are materialized. Over-fetch = ceil(top_k / filter_selectivity).
 -- For 2.6% selectivity and top_k=50: ceil(50 / 0.026) ≈ 1,924 → use 2,000.
--- Expected outcome: ~187 ms. First workaround to actually use HNSW.
+-- Measured: HNSW is used. With iterative scan off the inner scan stops at ef_search candidates
+-- and only 18 of 50 rows come back (~2 ms); with hnsw.iterative_scan = relaxed_order, 50 rows in ~7 ms.
 -- ------------------------------------------------------------------------------
 
 -- 10.6a. Plan inspection (over-fetch 2000 candidates for top_k=50 at 2.6% selectivity).
@@ -1230,7 +1244,7 @@ LIMIT 50;
 -- Recall = overlap_count / ground_truth_count * 100.
 
 -- 11.1. Compute ground-truth result set (exact brute-force, no index).
--- WARNING: On 2.5M rows at 1536 dimensions this will be slow (~215 s).
+-- WARNING: On 2.5M rows at 1536 dimensions this computes 2.5 million distances; expect it to be slow.
 -- Run once, store in a temp table, reuse for all comparisons.
 
 DROP TABLE IF EXISTS gt_results;
@@ -1314,3 +1328,33 @@ FROM cte_results c
 LEFT JOIN gt_results g ON c.id = g.id
 WHERE g.id IS NULL
 ORDER BY c.cte_rank;
+
+
+-- Debug
+-- ==================================================
+
+
+SELECT tablename, attname, n_distinct, most_common_vals
+FROM pg_stats
+WHERE tablename = 'wot_chunks_2_5m_expr_idx';
+
+
+EXPLAIN SELECT id FROM wot_chunks_2_5m
+WHERE metadata->>'book_name' = '00. New Spring'
+LIMIT 1;
+
+
+DROP INDEX wot_chunks_2_5m_expr_idx;
+CREATE INDEX wot_chunks_2_5m_expr_idx
+    ON wot_chunks_2_5m ((metadata->>'book_name'));
+
+
+SELECT * FROM pg_stats WHERE tablename = 'wot_chunks_2_5m_expr_idx';
+
+SELECT * FROM pg_stats;
+
+
+ANALYZE wot_chunks_2_5m;
+
+
+

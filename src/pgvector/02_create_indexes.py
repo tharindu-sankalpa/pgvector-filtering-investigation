@@ -141,6 +141,58 @@ def log_result(index_type, params, row_count, build_time):
     results_conn.close()
     logger.info("results_saved_to_db")
 
+def analyze_table() -> None:
+    """
+    Refresh planner statistics after the indexes are built.
+
+    PostgreSQL collects statistics for an indexed expression such as
+    metadata->>'book_name' only when ANALYZE runs after that index exists.
+    CREATE INDEX does not collect them, and autovacuum's own ANALYZE usually
+    ran during the bulk insert, before the indexes existed. Without these
+    statistics the planner assumes every filter value matches 0.5% of the
+    table, which makes filtered vector searches switch from the HNSW index to
+    a brute-force bitmap scan at small LIMIT values. Running ANALYZE here makes
+    this script leave the table in a correct state on every execution path.
+
+    Raises:
+        psycopg2.Error: If ANALYZE or the statistics check fails. The error is
+            logged with its stack trace and re-raised, because continuing with
+            missing statistics would invalidate any later retrieval benchmark.
+    """
+    log = logger.bind(task="analyze_table", table=common.TABLE_NAME)
+    conn = common.get_db_connection()
+    try:
+        with conn.cursor() as cur:
+            # --- Step 1: collect statistics for the table and its expression indexes ---
+            log.info("analyze_started")
+            start_time = time.time()
+            cur.execute(f"ANALYZE {common.TABLE_NAME};")
+            conn.commit()
+            log.info("analyze_completed", duration_seconds=round(time.time() - start_time, 2))
+
+            # --- Step 2: confirm expression-index statistics now exist ---
+            # Expression-index statistics are listed in pg_stats under the index name.
+            cur.execute(
+                """
+                SELECT s.tablename, s.n_distinct
+                FROM pg_stats s
+                JOIN pg_indexes i ON i.indexname = s.tablename
+                WHERE i.tablename = %s;
+                """,
+                (common.TABLE_NAME,),
+            )
+            expression_stats = cur.fetchall()
+            log.info("expression_statistics_present",
+                     indexes_with_statistics=[row[0] for row in expression_stats],
+                     n_distinct=[row[1] for row in expression_stats])
+    except Exception:
+        conn.rollback()
+        log.exception("analyze_failed")
+        raise
+    finally:
+        conn.close()
+
+
 def detect_dataset_type() -> str:
     """
     Detect dataset type based on table name.
@@ -187,6 +239,10 @@ def main():
     create_index("B-Tree", {"field": filter_field})
 
     logger.info("all_indexes_created_successfully")
+
+    # 4. Collect statistics, including those for the metadata expression index.
+    #    Without this step, filtered search falls into the missing-statistics trap.
+    analyze_table()
 
 
 if __name__ == "__main__":

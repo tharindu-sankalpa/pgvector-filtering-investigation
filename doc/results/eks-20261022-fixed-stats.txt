@@ -1,0 +1,584 @@
+Pager usage is off.
+SET
+=== 1. Expression statistics present? (0 rows = trap state)
+        tablename         | attname | n_distinct
+--------------------------+---------+------------
+ wot_chunks_2_5m_expr_idx | expr    |         16
+(1 row)
+
+=== 1b. Planner row estimate vs actual row count for each test filter
+       book_name        | actual_rows
+------------------------+-------------
+ 00. New Spring         |       63945
+ 13. Towers of Midnight |      168426
+ 06. Lord of Chaos      |      209226
+(3 rows)
+
+ QUERY PLAN
+----------
+ Bitmap Heap Scan on wot_chunks_2_5m  (cost=542.76..54667.49 rows=62172 width=8)
+   Recheck Cond: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+   ->  Bitmap Index Scan on wot_chunks_2_5m_expr_idx  (cost=0.00..527.22 rows=62172 width=0)
+         Index Cond: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+(4 rows)
+
+CREATE FUNCTION
+=== 2. First LIMIT that abandons HNSW (ef_search x filter)
+ ef_search |       book_name        |       switches_at_limit
+-----------+------------------------+--------------------------------
+        40 | 00. New Spring         | HNSW for every LIMIT up to 200
+        40 | 06. Lord of Chaos      | HNSW for every LIMIT up to 200
+        40 | 13. Towers of Midnight | HNSW for every LIMIT up to 200
+        64 | 00. New Spring         | HNSW for every LIMIT up to 200
+        64 | 06. Lord of Chaos      | HNSW for every LIMIT up to 200
+        64 | 13. Towers of Midnight | HNSW for every LIMIT up to 200
+       100 | 00. New Spring         | HNSW for every LIMIT up to 200
+       100 | 06. Lord of Chaos      | HNSW for every LIMIT up to 200
+       100 | 13. Towers of Midnight | HNSW for every LIMIT up to 200
+       200 | 00. New Spring         | HNSW for every LIMIT up to 200
+       200 | 06. Lord of Chaos      | HNSW for every LIMIT up to 200
+       200 | 13. Towers of Midnight | HNSW for every LIMIT up to 200
+       400 | 00. New Spring         | HNSW for every LIMIT up to 200
+       400 | 06. Lord of Chaos      | HNSW for every LIMIT up to 200
+       400 | 13. Towers of Midnight | HNSW for every LIMIT up to 200
+(15 rows)
+
+SET
+SET
+=== 3a. New Spring, LIMIT 40 (warm-up run, then measured run)
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..3518.46 rows=40 width=16) (actual time=2.707..2.894 rows=18.00 loops=1)
+   Buffers: shared hit=1460 read=2
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959263.99 rows=62172 width=16) (actual time=2.706..2.891 rows=18.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 22
+         Index Searches: 1
+         Buffers: shared hit=1460 read=2
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.039 ms
+ Execution Time: 2.925 ms
+(12 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..3518.46 rows=40 width=16) (actual time=1.635..1.761 rows=18.00 loops=1)
+   Buffers: shared hit=1456
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959263.99 rows=62172 width=16) (actual time=1.634..1.758 rows=18.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 22
+         Index Searches: 1
+         Buffers: shared hit=1456
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.040 ms
+ Execution Time: 1.771 ms
+(12 rows)
+
+=== 3b. New Spring, LIMIT 41
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..3582.13 rows=41 width=16) (actual time=0.921..1.037 rows=18.00 loops=1)
+   Buffers: shared hit=1456
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959263.99 rows=62172 width=16) (actual time=0.920..1.035 rows=18.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 22
+         Index Searches: 1
+         Buffers: shared hit=1456
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.040 ms
+ Execution Time: 1.047 ms
+(12 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..3582.13 rows=41 width=16) (actual time=0.829..0.913 rows=18.00 loops=1)
+   Buffers: shared hit=1456
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959263.99 rows=62172 width=16) (actual time=0.828..0.911 rows=18.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 22
+         Index Searches: 1
+         Buffers: shared hit=1456
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.038 ms
+ Execution Time: 0.923 ms
+(12 rows)
+
+=== 3c. Lord of Chaos (largest filter), LIMIT 41
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..1749.55 rows=41 width=16) (actual time=0.840..0.841 rows=0.00 loops=1)
+   Buffers: shared hit=1384
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959630.27 rows=208684 width=16) (actual time=0.840..0.840 rows=0.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '06. Lord of Chaos'::text)
+         Rows Removed by Filter: 40
+         Index Searches: 1
+         Buffers: shared hit=1384
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.039 ms
+ Execution Time: 0.849 ms
+(12 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..1749.55 rows=41 width=16) (actual time=0.838..0.838 rows=0.00 loops=1)
+   Buffers: shared hit=1384
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959630.27 rows=208684 width=16) (actual time=0.837..0.837 rows=0.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '06. Lord of Chaos'::text)
+         Rows Removed by Filter: 40
+         Index Searches: 1
+         Buffers: shared hit=1384
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.038 ms
+ Execution Time: 0.847 ms
+(12 rows)
+
+=== 4a. HNSW, ef_search=40, iterative off, LIMIT 40 (rows returned)
+ rows_returned
+---------------
+            18
+(1 row)
+
+=== 4b. HNSW, ef_search=40, iterative strict_order, LIMIT 40
+SET
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..3518.46 rows=40 width=16) (actual time=0.852..7.253 rows=40.00 loops=1)
+   Buffers: shared hit=4644 read=36
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959263.99 rows=62172 width=16) (actual time=0.852..7.247 rows=40.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 88
+         Index Searches: 1
+         Buffers: shared hit=4644 read=36
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.038 ms
+ Execution Time: 7.265 ms
+(12 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..3518.46 rows=40 width=16) (actual time=1.223..5.867 rows=40.00 loops=1)
+   Buffers: shared hit=4680
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959263.99 rows=62172 width=16) (actual time=1.222..5.860 rows=40.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 88
+         Index Searches: 1
+         Buffers: shared hit=4680
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.064 ms
+ Execution Time: 5.884 ms
+(12 rows)
+
+RESET
+=== 5.0 Default
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..4155.13 rows=50 width=16) (actual time=0.945..1.035 rows=18.00 loops=1)
+   Buffers: shared hit=1456
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959263.99 rows=62172 width=16) (actual time=0.944..1.033 rows=18.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 22
+         Index Searches: 1
+         Buffers: shared hit=1456
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.047 ms
+ Execution Time: 1.046 ms
+(12 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..4155.13 rows=50 width=16) (actual time=0.903..0.996 rows=18.00 loops=1)
+   Buffers: shared hit=1456
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959263.99 rows=62172 width=16) (actual time=0.902..0.993 rows=18.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 22
+         Index Searches: 1
+         Buffers: shared hit=1456
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.045 ms
+ Execution Time: 1.007 ms
+(12 rows)
+
+=== 5.1 enable_bitmapscan = off
+SET
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..4155.13 rows=50 width=16) (actual time=0.846..0.933 rows=18.00 loops=1)
+   Buffers: shared hit=1456
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959263.99 rows=62172 width=16) (actual time=0.846..0.930 rows=18.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 22
+         Index Searches: 1
+         Buffers: shared hit=1456
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.041 ms
+ Execution Time: 0.943 ms
+(12 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..4155.13 rows=50 width=16) (actual time=0.826..0.911 rows=18.00 loops=1)
+   Buffers: shared hit=1456
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959263.99 rows=62172 width=16) (actual time=0.825..0.909 rows=18.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 22
+         Index Searches: 1
+         Buffers: shared hit=1456
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.039 ms
+ Execution Time: 0.920 ms
+(12 rows)
+
+RESET
+=== 5.2 enable_seqscan, enable_bitmapscan, enable_indexscan = off (also disables the HNSW index scan)
+SET
+SET
+SET
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..4155.13 rows=50 width=16) (actual time=0.836..0.920 rows=18.00 loops=1)
+   Buffers: shared hit=1456
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959263.99 rows=62172 width=16) (actual time=0.835..0.918 rows=18.00 loops=1)
+         Disabled: true
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 22
+         Index Searches: 1
+         Buffers: shared hit=1456
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.039 ms
+ Execution Time: 0.929 ms
+(13 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..4155.13 rows=50 width=16) (actual time=0.853..0.938 rows=18.00 loops=1)
+   Buffers: shared hit=1456
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959263.99 rows=62172 width=16) (actual time=0.853..0.935 rows=18.00 loops=1)
+         Disabled: true
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 22
+         Index Searches: 1
+         Buffers: shared hit=1456
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.038 ms
+ Execution Time: 0.947 ms
+(13 rows)
+
+RESET
+RESET
+RESET
+=== 5.3 hnsw.ef_search = 200
+SET
+ QUERY PLAN
+----------
+ Limit  (cost=3376.21..6557.62 rows=50 width=16) (actual time=5.767..6.165 rows=50.00 loops=1)
+   Buffers: shared hit=5602 read=12
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=3376.21..3959263.99 rows=62172 width=16) (actual time=5.766..6.160 rows=50.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 135
+         Index Searches: 1
+         Buffers: shared hit=5602 read=12
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.040 ms
+ Execution Time: 6.178 ms
+(12 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=3376.21..6557.62 rows=50 width=16) (actual time=4.861..5.229 rows=50.00 loops=1)
+   Buffers: shared hit=5614
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=3376.21..3959263.99 rows=62172 width=16) (actual time=4.861..5.223 rows=50.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 135
+         Index Searches: 1
+         Buffers: shared hit=5614
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.040 ms
+ Execution Time: 5.241 ms
+(12 rows)
+
+SET
+=== 5.4 hnsw.iterative_scan = relaxed_order
+SET
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..4155.13 rows=50 width=16) (actual time=0.923..5.246 rows=50.00 loops=1)
+   Buffers: shared hit=5618
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959263.99 rows=62172 width=16) (actual time=0.923..5.240 rows=50.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 135
+         Index Searches: 1
+         Buffers: shared hit=5618
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.041 ms
+ Execution Time: 5.259 ms
+(12 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..4155.13 rows=50 width=16) (actual time=0.932..5.000 rows=50.00 loops=1)
+   Buffers: shared hit=5618
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959263.99 rows=62172 width=16) (actual time=0.931..4.994 rows=50.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 135
+         Index Searches: 1
+         Buffers: shared hit=5618
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.043 ms
+ Execution Time: 5.013 ms
+(12 rows)
+
+=== 5.5 iterative relaxed_order + enable_seqscan, enable_bitmapscan, enable_indexscan = off
+SET
+SET
+SET
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..4155.13 rows=50 width=16) (actual time=0.947..4.929 rows=50.00 loops=1)
+   Buffers: shared hit=5618
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959263.99 rows=62172 width=16) (actual time=0.947..4.923 rows=50.00 loops=1)
+         Disabled: true
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 135
+         Index Searches: 1
+         Buffers: shared hit=5618
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.041 ms
+ Execution Time: 4.942 ms
+(13 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..4155.13 rows=50 width=16) (actual time=0.947..4.880 rows=50.00 loops=1)
+   Buffers: shared hit=5618
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3959263.99 rows=62172 width=16) (actual time=0.946..4.874 rows=50.00 loops=1)
+         Disabled: true
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 135
+         Index Searches: 1
+         Buffers: shared hit=5618
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.042 ms
+ Execution Time: 4.893 ms
+(13 rows)
+
+RESET
+RESET
+RESET
+RESET
+=== 5.6a CTE over-fetch (inner LIMIT 50 x 40 = 2000), iterative off
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..4163.04 rows=10 width=16) (actual time=0.959..1.229 rows=18.00 loops=1)
+   Buffers: shared hit=1542 read=2
+   ->  Subquery Scan on nearest  (cost=971.79..4163.04 rows=10 width=16) (actual time=0.958..1.226 rows=18.00 loops=1)
+         Filter: ((nearest.metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 22
+         Buffers: shared hit=1542 read=2
+         ->  Limit  (cost=971.79..4133.04 rows=2000 width=123) (actual time=0.956..1.215 rows=40.00 loops=1)
+               Buffers: shared hit=1542 read=2
+               ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3952858.04 rows=2500207 width=123) (actual time=0.956..1.211 rows=40.00 loops=1)
+                     Order By: (embedding <=> '[query vector]'::vector)
+                     Index Searches: 1
+                     Buffers: shared hit=1542 read=2
+ Planning:
+   Buffers: shared hit=8
+ Planning Time: 0.092 ms
+ Execution Time: 1.241 ms
+(16 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..4163.04 rows=10 width=16) (actual time=0.932..1.141 rows=18.00 loops=1)
+   Buffers: shared hit=1544
+   ->  Subquery Scan on nearest  (cost=971.79..4163.04 rows=10 width=16) (actual time=0.931..1.138 rows=18.00 loops=1)
+         Filter: ((nearest.metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 22
+         Buffers: shared hit=1544
+         ->  Limit  (cost=971.79..4133.04 rows=2000 width=123) (actual time=0.930..1.128 rows=40.00 loops=1)
+               Buffers: shared hit=1544
+               ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3952858.04 rows=2500207 width=123) (actual time=0.930..1.124 rows=40.00 loops=1)
+                     Order By: (embedding <=> '[query vector]'::vector)
+                     Index Searches: 1
+                     Buffers: shared hit=1544
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.048 ms
+ Execution Time: 1.152 ms
+(16 rows)
+
+=== 5.6b CTE over-fetch, iterative relaxed_order (lets the inner HNSW scan return 2000 rows)
+SET
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..4163.04 rows=10 width=16) (actual time=0.863..5.952 rows=50.00 loops=1)
+   Buffers: shared hit=6123 read=35
+   ->  Subquery Scan on nearest  (cost=971.79..4163.04 rows=10 width=16) (actual time=0.862..5.947 rows=50.00 loops=1)
+         Filter: ((nearest.metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 135
+         Buffers: shared hit=6123 read=35
+         ->  Limit  (cost=971.79..4133.04 rows=2000 width=123) (actual time=0.861..5.904 rows=185.00 loops=1)
+               Buffers: shared hit=6123 read=35
+               ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3952858.04 rows=2500207 width=123) (actual time=0.861..5.887 rows=185.00 loops=1)
+                     Order By: (embedding <=> '[query vector]'::vector)
+                     Index Searches: 1
+                     Buffers: shared hit=6123 read=35
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.044 ms
+ Execution Time: 5.967 ms
+(16 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..4163.04 rows=10 width=16) (actual time=0.910..5.638 rows=50.00 loops=1)
+   Buffers: shared hit=6158
+   ->  Subquery Scan on nearest  (cost=971.79..4163.04 rows=10 width=16) (actual time=0.910..5.633 rows=50.00 loops=1)
+         Filter: ((nearest.metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 135
+         Buffers: shared hit=6158
+         ->  Limit  (cost=971.79..4133.04 rows=2000 width=123) (actual time=0.908..5.590 rows=185.00 loops=1)
+               Buffers: shared hit=6158
+               ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3952858.04 rows=2500207 width=123) (actual time=0.908..5.574 rows=185.00 loops=1)
+                     Order By: (embedding <=> '[query vector]'::vector)
+                     Index Searches: 1
+                     Buffers: shared hit=6158
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.048 ms
+ Execution Time: 5.653 ms
+(16 rows)
+
+RESET
+=== 5.7 Benchmark settings: ef_search=64, iterative strict_order
+SET
+SET
+ QUERY PLAN
+----------
+ Limit  (cost=1372.98..4555.99 rows=50 width=16) (actual time=1.471..4.624 rows=50.00 loops=1)
+   Buffers: shared hit=5430
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=1372.98..3959263.99 rows=62172 width=16) (actual time=1.471..4.619 rows=50.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 117
+         Index Searches: 1
+         Buffers: shared hit=5430
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.044 ms
+ Execution Time: 4.638 ms
+(12 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=1372.98..4555.99 rows=50 width=16) (actual time=1.472..4.610 rows=50.00 loops=1)
+   Buffers: shared hit=5430
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=1372.98..3959263.99 rows=62172 width=16) (actual time=1.472..4.604 rows=50.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Filter: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+         Rows Removed by Filter: 117
+         Index Searches: 1
+         Buffers: shared hit=5430
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.043 ms
+ Execution Time: 4.623 ms
+(12 rows)
+
+RESET
+RESET
+=== 6. Compound filter: estimate vs actual
+ actual_rows
+-------------
+        4129
+(1 row)
+
+SET
+ QUERY PLAN
+----------
+ Limit  (cost=54970.38..54970.41 rows=10 width=16) (actual time=120.051..120.054 rows=10.00 loops=1)
+   Buffers: shared hit=59163 read=7553
+   ->  Sort  (cost=54970.38..54971.16 rows=311 width=16) (actual time=120.050..120.052 rows=10.00 loops=1)
+         Sort Key: ((embedding <=> '[query vector]'::vector))
+         Sort Method: top-N heapsort  Memory: 25kB
+         Buffers: shared hit=59163 read=7553
+         ->  Bitmap Heap Scan on wot_chunks_2_5m  (cost=527.30..54963.66 rows=311 width=16) (actual time=11.219..119.338 rows=4129.00 loops=1)
+               Recheck Cond: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+               Filter: ((metadata ->> 'chapter_number'::text) = '5'::text)
+               Rows Removed by Filter: 59816
+               Heap Blocks: exact=50143
+               Buffers: shared hit=59163 read=7553
+               ->  Bitmap Index Scan on wot_chunks_2_5m_expr_idx  (cost=0.00..527.22 rows=62172 width=0) (actual time=3.854..3.855 rows=63945.00 loops=1)
+                     Index Cond: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+                     Index Searches: 1
+                     Buffers: shared hit=57
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.058 ms
+ Execution Time: 120.071 ms
+(20 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=54970.38..54970.41 rows=10 width=16) (actual time=94.573..94.575 rows=10.00 loops=1)
+   Buffers: shared hit=66716
+   ->  Sort  (cost=54970.38..54971.16 rows=311 width=16) (actual time=94.572..94.573 rows=10.00 loops=1)
+         Sort Key: ((embedding <=> '[query vector]'::vector))
+         Sort Method: top-N heapsort  Memory: 25kB
+         Buffers: shared hit=66716
+         ->  Bitmap Heap Scan on wot_chunks_2_5m  (cost=527.30..54963.66 rows=311 width=16) (actual time=11.063..93.914 rows=4129.00 loops=1)
+               Recheck Cond: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+               Filter: ((metadata ->> 'chapter_number'::text) = '5'::text)
+               Rows Removed by Filter: 59816
+               Heap Blocks: exact=50143
+               Buffers: shared hit=66716
+               ->  Bitmap Index Scan on wot_chunks_2_5m_expr_idx  (cost=0.00..527.22 rows=62172 width=0) (actual time=3.994..3.995 rows=63945.00 loops=1)
+                     Index Cond: ((metadata ->> 'book_name'::text) = '00. New Spring'::text)
+                     Index Searches: 1
+                     Buffers: shared hit=57
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.078 ms
+ Execution Time: 94.591 ms
+(20 rows)
+
+RESET

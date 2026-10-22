@@ -1,0 +1,402 @@
+Pager usage is off.
+SET
+SET
+=== 0. How many rows match the keyword?
+ matching_rows
+---------------
+         76198
+(1 row)
+
+=== 1. Pure vector search, LIMIT 10
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..987.60 rows=10 width=16) (actual time=3.488..3.638 rows=10.00 loops=1)
+   Buffers: shared hit=1401
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3952858.04 rows=2500207 width=16) (actual time=3.487..3.635 rows=10.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Index Searches: 1
+         Buffers: shared hit=1401
+ Planning:
+   Buffers: shared hit=17
+ Planning Time: 0.094 ms
+ Execution Time: 3.666 ms
+(10 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=971.79..987.60 rows=10 width=16) (actual time=1.557..1.607 rows=10.00 loops=1)
+   Buffers: shared hit=1395
+   ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3952858.04 rows=2500207 width=16) (actual time=1.556..1.605 rows=10.00 loops=1)
+         Order By: (embedding <=> '[query vector]'::vector)
+         Index Searches: 1
+         Buffers: shared hit=1395
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.043 ms
+ Execution Time: 1.617 ms
+(10 rows)
+
+=== 2. Vector CTE with ROW_NUMBER, LIMIT 20
+ QUERY PLAN
+----------
+ Limit  (cost=973.39..1005.35 rows=20 width=24) (actual time=0.882..1.044 rows=20.00 loops=1)
+   Buffers: shared hit=1444
+   ->  WindowAgg  (cost=973.39..3996611.66 rows=2500207 width=24) (actual time=0.881..1.042 rows=20.00 loops=1)
+         Window: w1 AS (ORDER BY (embedding <=> '[query vector]'::vector) ROWS UNBOUNDED PRECEDING)
+         Storage: Memory  Maximum Storage: 17kB
+         Buffers: shared hit=1444
+         ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3952858.04 rows=2500207 width=16) (actual time=0.877..1.030 rows=20.00 loops=1)
+               Order By: (embedding <=> '[query vector]'::vector)
+               Index Searches: 1
+               Buffers: shared hit=1444
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.042 ms
+ Execution Time: 1.068 ms
+(14 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=973.39..1005.35 rows=20 width=24) (actual time=0.839..0.948 rows=20.00 loops=1)
+   Buffers: shared hit=1444
+   ->  WindowAgg  (cost=973.39..3996611.66 rows=2500207 width=24) (actual time=0.838..0.946 rows=20.00 loops=1)
+         Window: w1 AS (ORDER BY (embedding <=> '[query vector]'::vector) ROWS UNBOUNDED PRECEDING)
+         Storage: Memory  Maximum Storage: 17kB
+         Buffers: shared hit=1444
+         ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3952858.04 rows=2500207 width=16) (actual time=0.835..0.936 rows=20.00 loops=1)
+               Order By: (embedding <=> '[query vector]'::vector)
+               Index Searches: 1
+               Buffers: shared hit=1444
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.039 ms
+ Execution Time: 0.961 ms
+(14 rows)
+
+=== 3. Text-search CTE alone, LIMIT 20
+ QUERY PLAN
+----------
+ Limit  (cost=76706.20..76713.95 rows=20 width=20) (actual time=588.465..600.842 rows=20.00 loops=1)
+   Buffers: shared hit=59678
+   ->  WindowAgg  (cost=76706.20..107074.17 rows=78423 width=20) (actual time=588.464..600.839 rows=20.00 loops=1)
+         Window: w1 AS (ORDER BY (ts_rank(to_tsvector('english'::regconfig, content), '''dragon'''::tsquery)) ROWS UNBOUNDED PRECEDING)
+         Storage: Memory  Maximum Storage: 17kB
+         Buffers: shared hit=59678
+         ->  Gather Merge  (cost=76706.07..86096.02 rows=78423 width=12) (actual time=588.456..600.826 rows=20.00 loops=1)
+               Workers Planned: 4
+               Workers Launched: 4
+               Buffers: shared hit=59678
+               ->  Sort  (cost=75706.01..75755.02 rows=19606 width=12) (actual time=585.644..585.704 rows=501.60 loops=5)
+                     Sort Key: (ts_rank(to_tsvector('english'::regconfig, content), '''dragon'''::tsquery)) DESC
+                     Sort Method: quicksort  Memory: 863kB
+                     Buffers: shared hit=59678
+                     Worker 0:  Sort Method: quicksort  Memory: 863kB
+                     Worker 1:  Sort Method: quicksort  Memory: 850kB
+                     Worker 2:  Sort Method: quicksort  Memory: 865kB
+                     Worker 3:  Sort Method: quicksort  Memory: 863kB
+                     ->  Parallel Bitmap Heap Scan on wot_chunks_2_5m  (cost=451.50..74308.20 rows=19606 width=12) (actual time=21.540..583.123 rows=15239.60 loops=5)
+                           Recheck Cond: (to_tsvector('english'::regconfig, content) @@ '''dragon'''::tsquery)
+                           Heap Blocks: exact=11812
+                           Buffers: shared hit=59646
+                           Worker 0:  Heap Blocks: exact=11815
+                           Worker 1:  Heap Blocks: exact=11559
+                           Worker 2:  Heap Blocks: exact=11973
+                           Worker 3:  Heap Blocks: exact=11908
+                           ->  Bitmap Index Scan on wot_chunks_2_5m_to_tsvector_idx  (cost=0.00..431.90 rows=78423 width=0) (actual time=14.253..14.254 rows=76198.00 loops=1)
+                                 Index Cond: (to_tsvector('english'::regconfig, content) @@ '''dragon'''::tsquery)
+                                 Index Searches: 1
+                                 Buffers: shared hit=23
+ Planning:
+   Buffers: shared hit=19
+ Planning Time: 0.149 ms
+ Execution Time: 600.934 ms
+(34 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=76706.20..76713.95 rows=20 width=20) (actual time=583.506..595.833 rows=20.00 loops=1)
+   Buffers: shared hit=59674
+   ->  WindowAgg  (cost=76706.20..107074.17 rows=78423 width=20) (actual time=583.504..595.829 rows=20.00 loops=1)
+         Window: w1 AS (ORDER BY (ts_rank(to_tsvector('english'::regconfig, content), '''dragon'''::tsquery)) ROWS UNBOUNDED PRECEDING)
+         Storage: Memory  Maximum Storage: 17kB
+         Buffers: shared hit=59674
+         ->  Gather Merge  (cost=76706.07..86096.02 rows=78423 width=12) (actual time=583.497..595.817 rows=20.00 loops=1)
+               Workers Planned: 4
+               Workers Launched: 4
+               Buffers: shared hit=59674
+               ->  Sort  (cost=75706.01..75755.02 rows=19606 width=12) (actual time=580.646..580.713 rows=580.20 loops=5)
+                     Sort Key: (ts_rank(to_tsvector('english'::regconfig, content), '''dragon'''::tsquery)) DESC
+                     Sort Method: quicksort  Memory: 863kB
+                     Buffers: shared hit=59674
+                     Worker 0:  Sort Method: quicksort  Memory: 859kB
+                     Worker 1:  Sort Method: quicksort  Memory: 862kB
+                     Worker 2:  Sort Method: quicksort  Memory: 859kB
+                     Worker 3:  Sort Method: quicksort  Memory: 860kB
+                     ->  Parallel Bitmap Heap Scan on wot_chunks_2_5m  (cost=451.50..74308.20 rows=19606 width=12) (actual time=21.352..578.138 rows=15239.60 loops=5)
+                           Recheck Cond: (to_tsvector('english'::regconfig, content) @@ '''dragon'''::tsquery)
+                           Heap Blocks: exact=11904
+                           Buffers: shared hit=59642
+                           Worker 0:  Heap Blocks: exact=11723
+                           Worker 1:  Heap Blocks: exact=11841
+                           Worker 2:  Heap Blocks: exact=11799
+                           Worker 3:  Heap Blocks: exact=11800
+                           ->  Bitmap Index Scan on wot_chunks_2_5m_to_tsvector_idx  (cost=0.00..431.90 rows=78423 width=0) (actual time=14.168..14.168 rows=76198.00 loops=1)
+                                 Index Cond: (to_tsvector('english'::regconfig, content) @@ '''dragon'''::tsquery)
+                                 Index Searches: 1
+                                 Buffers: shared hit=23
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.151 ms
+ Execution Time: 595.917 ms
+(34 rows)
+
+=== 4. Full hybrid RRF query, top_k 10 (CTE limits 20)
+ QUERY PLAN
+----------
+ Limit  (cost=77721.00..77721.03 rows=10 width=40) (actual time=581.644..593.680 rows=10.00 loops=1)
+   Buffers: shared hit=61121
+   ->  Sort  (cost=77721.00..77721.05 rows=20 width=40) (actual time=581.643..593.678 rows=10.00 loops=1)
+         Sort Key: ((COALESCE((1.0 / ((60 + (row_number() OVER w1)))::numeric), 0.0) + COALESCE((1.0 / ((60 + t.rank))::numeric), 0.0))) DESC
+         Sort Method: top-N heapsort  Memory: 25kB
+         Buffers: shared hit=61121
+         ->  Hash Full Join  (cost=77687.78..77720.57 rows=20 width=40) (actual time=581.454..593.650 rows=40.00 loops=1)
+               Hash Cond: (wot_chunks_2_5m.id = t.id)
+               Buffers: shared hit=61118
+               ->  Limit  (cost=973.39..1005.35 rows=20 width=24) (actual time=1.805..1.947 rows=20.00 loops=1)
+                     Buffers: shared hit=1444
+                     ->  WindowAgg  (cost=973.39..3996611.66 rows=2500207 width=24) (actual time=1.803..1.944 rows=20.00 loops=1)
+                           Window: w1 AS (ORDER BY (wot_chunks_2_5m.embedding <=> '[query vector]'::vector) ROWS UNBOUNDED PRECEDING)
+                           Storage: Memory  Maximum Storage: 17kB
+                           Buffers: shared hit=1444
+                           ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3952858.04 rows=2500207 width=16) (actual time=1.799..1.933 rows=20.00 loops=1)
+                                 Order By: (embedding <=> '[query vector]'::vector)
+                                 Index Searches: 1
+                                 Buffers: shared hit=1444
+               ->  Hash  (cost=76714.15..76714.15 rows=20 width=16) (actual time=579.641..591.674 rows=20.00 loops=1)
+                     Buckets: 1024  Batches: 1  Memory Usage: 9kB
+                     Buffers: shared hit=59674
+                     ->  Subquery Scan on t  (cost=76706.20..76714.15 rows=20 width=16) (actual time=579.623..591.667 rows=20.00 loops=1)
+                           Buffers: shared hit=59674
+                           ->  Limit  (cost=76706.20..76713.95 rows=20 width=20) (actual time=579.621..591.663 rows=20.00 loops=1)
+                                 Buffers: shared hit=59674
+                                 ->  WindowAgg  (cost=76706.20..107074.17 rows=78423 width=20) (actual time=579.620..591.660 rows=20.00 loops=1)
+                                       Window: w1 AS (ORDER BY (ts_rank(to_tsvector('english'::regconfig, wot_chunks_2_5m_1.content), '''dragon'''::tsquery)) ROWS UNBOUNDED PRECEDING)
+                                       Storage: Memory  Maximum Storage: 17kB
+                                       Buffers: shared hit=59674
+                                       ->  Gather Merge  (cost=76706.07..86096.02 rows=78423 width=12) (actual time=579.613..591.647 rows=20.00 loops=1)
+                                             Workers Planned: 4
+                                             Workers Launched: 4
+                                             Buffers: shared hit=59674
+                                             ->  Sort  (cost=75706.01..75755.02 rows=19606 width=12) (actual time=576.693..576.809 rows=1312.20 loops=5)
+                                                   Sort Key: (ts_rank(to_tsvector('english'::regconfig, wot_chunks_2_5m_1.content), '''dragon'''::tsquery)) DESC
+                                                   Sort Method: quicksort  Memory: 878kB
+                                                   Buffers: shared hit=59674
+                                                   Worker 0:  Sort Method: quicksort  Memory: 857kB
+                                                   Worker 1:  Sort Method: quicksort  Memory: 861kB
+                                                   Worker 2:  Sort Method: quicksort  Memory: 858kB
+                                                   Worker 3:  Sort Method: quicksort  Memory: 850kB
+                                                   ->  Parallel Bitmap Heap Scan on wot_chunks_2_5m wot_chunks_2_5m_1  (cost=451.50..74308.20 rows=19606 width=12) (actual time=21.245..574.161 rows=15239.60 loops=5)
+                                                         Recheck Cond: (to_tsvector('english'::regconfig, content) @@ '''dragon'''::tsquery)
+                                                         Heap Blocks: exact=12181
+                                                         Buffers: shared hit=59642
+                                                         Worker 0:  Heap Blocks: exact=11718
+                                                         Worker 1:  Heap Blocks: exact=11847
+                                                         Worker 2:  Heap Blocks: exact=11768
+                                                         Worker 3:  Heap Blocks: exact=11553
+                                                         ->  Bitmap Index Scan on wot_chunks_2_5m_to_tsvector_idx  (cost=0.00..431.90 rows=78423 width=0) (actual time=14.184..14.184 rows=76198.00 loops=1)
+                                                               Index Cond: (to_tsvector('english'::regconfig, content) @@ '''dragon'''::tsquery)
+                                                               Index Searches: 1
+                                                               Buffers: shared hit=23
+ Planning:
+   Buffers: shared hit=14
+ Planning Time: 0.261 ms
+ Execution Time: 593.761 ms
+(58 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=77721.00..77721.03 rows=10 width=40) (actual time=579.981..592.190 rows=10.00 loops=1)
+   Buffers: shared hit=61118
+   ->  Sort  (cost=77721.00..77721.05 rows=20 width=40) (actual time=579.980..592.188 rows=10.00 loops=1)
+         Sort Key: ((COALESCE((1.0 / ((60 + (row_number() OVER w1)))::numeric), 0.0) + COALESCE((1.0 / ((60 + t.rank))::numeric), 0.0))) DESC
+         Sort Method: top-N heapsort  Memory: 25kB
+         Buffers: shared hit=61118
+         ->  Hash Full Join  (cost=77687.78..77720.57 rows=20 width=40) (actual time=579.802..592.169 rows=40.00 loops=1)
+               Hash Cond: (wot_chunks_2_5m.id = t.id)
+               Buffers: shared hit=61118
+               ->  Limit  (cost=973.39..1005.35 rows=20 width=24) (actual time=1.770..1.910 rows=20.00 loops=1)
+                     Buffers: shared hit=1444
+                     ->  WindowAgg  (cost=973.39..3996611.66 rows=2500207 width=24) (actual time=1.768..1.907 rows=20.00 loops=1)
+                           Window: w1 AS (ORDER BY (wot_chunks_2_5m.embedding <=> '[query vector]'::vector) ROWS UNBOUNDED PRECEDING)
+                           Storage: Memory  Maximum Storage: 17kB
+                           Buffers: shared hit=1444
+                           ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3952858.04 rows=2500207 width=16) (actual time=1.765..1.897 rows=20.00 loops=1)
+                                 Order By: (embedding <=> '[query vector]'::vector)
+                                 Index Searches: 1
+                                 Buffers: shared hit=1444
+               ->  Hash  (cost=76714.15..76714.15 rows=20 width=16) (actual time=578.024..590.231 rows=20.00 loops=1)
+                     Buckets: 1024  Batches: 1  Memory Usage: 9kB
+                     Buffers: shared hit=59674
+                     ->  Subquery Scan on t  (cost=76706.20..76714.15 rows=20 width=16) (actual time=578.005..590.223 rows=20.00 loops=1)
+                           Buffers: shared hit=59674
+                           ->  Limit  (cost=76706.20..76713.95 rows=20 width=20) (actual time=578.004..590.219 rows=20.00 loops=1)
+                                 Buffers: shared hit=59674
+                                 ->  WindowAgg  (cost=76706.20..107074.17 rows=78423 width=20) (actual time=578.003..590.217 rows=20.00 loops=1)
+                                       Window: w1 AS (ORDER BY (ts_rank(to_tsvector('english'::regconfig, wot_chunks_2_5m_1.content), '''dragon'''::tsquery)) ROWS UNBOUNDED PRECEDING)
+                                       Storage: Memory  Maximum Storage: 17kB
+                                       Buffers: shared hit=59674
+                                       ->  Gather Merge  (cost=76706.07..86096.02 rows=78423 width=12) (actual time=577.995..590.203 rows=20.00 loops=1)
+                                             Workers Planned: 4
+                                             Workers Launched: 4
+                                             Buffers: shared hit=59674
+                                             ->  Sort  (cost=75706.01..75755.02 rows=19606 width=12) (actual time=575.166..575.281 rows=1313.40 loops=5)
+                                                   Sort Key: (ts_rank(to_tsvector('english'::regconfig, wot_chunks_2_5m_1.content), '''dragon'''::tsquery)) DESC
+                                                   Sort Method: quicksort  Memory: 878kB
+                                                   Buffers: shared hit=59674
+                                                   Worker 0:  Sort Method: quicksort  Memory: 859kB
+                                                   Worker 1:  Sort Method: quicksort  Memory: 856kB
+                                                   Worker 2:  Sort Method: quicksort  Memory: 855kB
+                                                   Worker 3:  Sort Method: quicksort  Memory: 856kB
+                                                   ->  Parallel Bitmap Heap Scan on wot_chunks_2_5m wot_chunks_2_5m_1  (cost=451.50..74308.20 rows=19606 width=12) (actual time=21.277..572.669 rows=15239.60 loops=5)
+                                                         Recheck Cond: (to_tsvector('english'::regconfig, content) @@ '''dragon'''::tsquery)
+                                                         Heap Blocks: exact=12273
+                                                         Buffers: shared hit=59642
+                                                         Worker 0:  Heap Blocks: exact=11716
+                                                         Worker 1:  Heap Blocks: exact=11683
+                                                         Worker 2:  Heap Blocks: exact=11709
+                                                         Worker 3:  Heap Blocks: exact=11686
+                                                         ->  Bitmap Index Scan on wot_chunks_2_5m_to_tsvector_idx  (cost=0.00..431.90 rows=78423 width=0) (actual time=14.109..14.109 rows=76198.00 loops=1)
+                                                               Index Cond: (to_tsvector('english'::regconfig, content) @@ '''dragon'''::tsquery)
+                                                               Index Searches: 1
+                                                               Buffers: shared hit=23
+ Planning:
+   Buffers: shared hit=2
+ Planning Time: 0.240 ms
+ Execution Time: 592.277 ms
+(58 rows)
+
+=== 5. Full hybrid RRF query, top_k 50 (CTE limits 100)
+ QUERY PLAN
+----------
+ Limit  (cost=77887.82..77887.94 rows=50 width=40) (actual time=586.594..598.908 rows=50.00 loops=1)
+   Buffers: shared hit=61218
+   ->  Sort  (cost=77887.82..77888.07 rows=100 width=40) (actual time=586.593..598.904 rows=50.00 loops=1)
+         Sort Key: ((COALESCE((1.0 / ((60 + (row_number() OVER w1)))::numeric), 0.0) + COALESCE((1.0 / ((60 + t.rank))::numeric), 0.0))) DESC
+         Sort Method: top-N heapsort  Memory: 29kB
+         Buffers: shared hit=61218
+         ->  Hash Full Join  (cost=77720.56..77884.50 rows=100 width=40) (actual time=586.102..598.811 rows=140.00 loops=1)
+               Hash Cond: (wot_chunks_2_5m.id = t.id)
+               Buffers: shared hit=61218
+               ->  Limit  (cost=973.39..1133.20 rows=100 width=24) (actual time=1.785..2.134 rows=40.00 loops=1)
+                     Buffers: shared hit=1544
+                     ->  WindowAgg  (cost=973.39..3996611.66 rows=2500207 width=24) (actual time=1.784..2.129 rows=40.00 loops=1)
+                           Window: w1 AS (ORDER BY (wot_chunks_2_5m.embedding <=> '[query vector]'::vector) ROWS UNBOUNDED PRECEDING)
+                           Storage: Memory  Maximum Storage: 17kB
+                           Buffers: shared hit=1544
+                           ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3952858.04 rows=2500207 width=16) (actual time=1.780..2.112 rows=40.00 loops=1)
+                                 Order By: (embedding <=> '[query vector]'::vector)
+                                 Index Searches: 1
+                                 Buffers: shared hit=1544
+               ->  Hash  (cost=76745.92..76745.92 rows=100 width=16) (actual time=584.309..596.617 rows=100.00 loops=1)
+                     Buckets: 1024  Batches: 1  Memory Usage: 13kB
+                     Buffers: shared hit=59674
+                     ->  Subquery Scan on t  (cost=76706.20..76745.92 rows=100 width=16) (actual time=584.245..596.596 rows=100.00 loops=1)
+                           Buffers: shared hit=59674
+                           ->  Limit  (cost=76706.20..76744.92 rows=100 width=20) (actual time=584.244..596.588 rows=100.00 loops=1)
+                                 Buffers: shared hit=59674
+                                 ->  WindowAgg  (cost=76706.20..107074.17 rows=78423 width=20) (actual time=584.244..596.581 rows=100.00 loops=1)
+                                       Window: w1 AS (ORDER BY (ts_rank(to_tsvector('english'::regconfig, wot_chunks_2_5m_1.content), '''dragon'''::tsquery)) ROWS UNBOUNDED PRECEDING)
+                                       Storage: Memory  Maximum Storage: 17kB
+                                       Buffers: shared hit=59674
+                                       ->  Gather Merge  (cost=76706.07..86096.02 rows=78423 width=12) (actual time=584.237..596.556 rows=100.00 loops=1)
+                                             Workers Planned: 4
+                                             Workers Launched: 4
+                                             Buffers: shared hit=59674
+                                             ->  Sort  (cost=75706.01..75755.02 rows=19606 width=12) (actual time=581.398..581.514 rows=1315.60 loops=5)
+                                                   Sort Key: (ts_rank(to_tsvector('english'::regconfig, wot_chunks_2_5m_1.content), '''dragon'''::tsquery)) DESC
+                                                   Sort Method: quicksort  Memory: 867kB
+                                                   Buffers: shared hit=59674
+                                                   Worker 0:  Sort Method: quicksort  Memory: 853kB
+                                                   Worker 1:  Sort Method: quicksort  Memory: 859kB
+                                                   Worker 2:  Sort Method: quicksort  Memory: 862kB
+                                                   Worker 3:  Sort Method: quicksort  Memory: 863kB
+                                                   ->  Parallel Bitmap Heap Scan on wot_chunks_2_5m wot_chunks_2_5m_1  (cost=451.50..74308.20 rows=19606 width=12) (actual time=21.340..578.918 rows=15239.60 loops=5)
+                                                         Recheck Cond: (to_tsvector('english'::regconfig, content) @@ '''dragon'''::tsquery)
+                                                         Heap Blocks: exact=11984
+                                                         Buffers: shared hit=59642
+                                                         Worker 0:  Heap Blocks: exact=11596
+                                                         Worker 1:  Heap Blocks: exact=11737
+                                                         Worker 2:  Heap Blocks: exact=11823
+                                                         Worker 3:  Heap Blocks: exact=11927
+                                                         ->  Bitmap Index Scan on wot_chunks_2_5m_to_tsvector_idx  (cost=0.00..431.90 rows=78423 width=0) (actual time=14.162..14.162 rows=76198.00 loops=1)
+                                                               Index Cond: (to_tsvector('english'::regconfig, content) @@ '''dragon'''::tsquery)
+                                                               Index Searches: 1
+                                                               Buffers: shared hit=23
+ Planning:
+   Buffers: shared hit=2
+ Planning Time: 0.243 ms
+ Execution Time: 598.995 ms
+(58 rows)
+
+ QUERY PLAN
+----------
+ Limit  (cost=77887.82..77887.94 rows=50 width=40) (actual time=581.333..593.921 rows=50.00 loops=1)
+   Buffers: shared hit=61218
+   ->  Sort  (cost=77887.82..77888.07 rows=100 width=40) (actual time=581.332..593.917 rows=50.00 loops=1)
+         Sort Key: ((COALESCE((1.0 / ((60 + (row_number() OVER w1)))::numeric), 0.0) + COALESCE((1.0 / ((60 + t.rank))::numeric), 0.0))) DESC
+         Sort Method: top-N heapsort  Memory: 29kB
+         Buffers: shared hit=61218
+         ->  Hash Full Join  (cost=77720.56..77884.50 rows=100 width=40) (actual time=580.906..593.824 rows=140.00 loops=1)
+               Hash Cond: (wot_chunks_2_5m.id = t.id)
+               Buffers: shared hit=61218
+               ->  Limit  (cost=973.39..1133.20 rows=100 width=24) (actual time=1.828..2.115 rows=40.00 loops=1)
+                     Buffers: shared hit=1544
+                     ->  WindowAgg  (cost=973.39..3996611.66 rows=2500207 width=24) (actual time=1.827..2.110 rows=40.00 loops=1)
+                           Window: w1 AS (ORDER BY (wot_chunks_2_5m.embedding <=> '[query vector]'::vector) ROWS UNBOUNDED PRECEDING)
+                           Storage: Memory  Maximum Storage: 17kB
+                           Buffers: shared hit=1544
+                           ->  Index Scan using wot_chunks_2_5m_embedding_idx on wot_chunks_2_5m  (cost=971.79..3952858.04 rows=2500207 width=16) (actual time=1.823..2.092 rows=40.00 loops=1)
+                                 Order By: (embedding <=> '[query vector]'::vector)
+                                 Index Searches: 1
+                                 Buffers: shared hit=1544
+               ->  Hash  (cost=76745.92..76745.92 rows=100 width=16) (actual time=579.069..591.651 rows=100.00 loops=1)
+                     Buckets: 1024  Batches: 1  Memory Usage: 13kB
+                     Buffers: shared hit=59674
+                     ->  Subquery Scan on t  (cost=76706.20..76745.92 rows=100 width=16) (actual time=579.005..591.633 rows=100.00 loops=1)
+                           Buffers: shared hit=59674
+                           ->  Limit  (cost=76706.20..76744.92 rows=100 width=20) (actual time=579.005..591.624 rows=100.00 loops=1)
+                                 Buffers: shared hit=59674
+                                 ->  WindowAgg  (cost=76706.20..107074.17 rows=78423 width=20) (actual time=579.004..591.618 rows=100.00 loops=1)
+                                       Window: w1 AS (ORDER BY (ts_rank(to_tsvector('english'::regconfig, wot_chunks_2_5m_1.content), '''dragon'''::tsquery)) ROWS UNBOUNDED PRECEDING)
+                                       Storage: Memory  Maximum Storage: 17kB
+                                       Buffers: shared hit=59674
+                                       ->  Gather Merge  (cost=76706.07..86096.02 rows=78423 width=12) (actual time=578.997..591.591 rows=100.00 loops=1)
+                                             Workers Planned: 4
+                                             Workers Launched: 4
+                                             Buffers: shared hit=59674
+                                             ->  Sort  (cost=75706.01..75755.02 rows=19606 width=12) (actual time=576.082..576.199 rows=1316.80 loops=5)
+                                                   Sort Key: (ts_rank(to_tsvector('english'::regconfig, wot_chunks_2_5m_1.content), '''dragon'''::tsquery)) DESC
+                                                   Sort Method: quicksort  Memory: 882kB
+                                                   Buffers: shared hit=59674
+                                                   Worker 0:  Sort Method: quicksort  Memory: 856kB
+                                                   Worker 1:  Sort Method: quicksort  Memory: 854kB
+                                                   Worker 2:  Sort Method: quicksort  Memory: 858kB
+                                                   Worker 3:  Sort Method: quicksort  Memory: 853kB
+                                                   ->  Parallel Bitmap Heap Scan on wot_chunks_2_5m wot_chunks_2_5m_1  (cost=451.50..74308.20 rows=19606 width=12) (actual time=21.288..573.591 rows=15239.60 loops=5)
+                                                         Recheck Cond: (to_tsvector('english'::regconfig, content) @@ '''dragon'''::tsquery)
+                                                         Heap Blocks: exact=12363
+                                                         Buffers: shared hit=59642
+                                                         Worker 0:  Heap Blocks: exact=11676
+                                                         Worker 1:  Heap Blocks: exact=11662
+                                                         Worker 2:  Heap Blocks: exact=11717
+                                                         Worker 3:  Heap Blocks: exact=11649
+                                                         ->  Bitmap Index Scan on wot_chunks_2_5m_to_tsvector_idx  (cost=0.00..431.90 rows=78423 width=0) (actual time=14.306..14.307 rows=76198.00 loops=1)
+                                                               Index Cond: (to_tsvector('english'::regconfig, content) @@ '''dragon'''::tsquery)
+                                                               Index Searches: 1
+                                                               Buffers: shared hit=23
+ Planning:
+   Buffers: shared hit=2
+ Planning Time: 0.237 ms
+ Execution Time: 594.013 ms
+(58 rows)
+

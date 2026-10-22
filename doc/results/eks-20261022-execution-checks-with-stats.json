@@ -1,0 +1,236 @@
+[
+  {
+    "label": "ef40_off_k100",
+    "nodes": [
+      {
+        "index": null,
+        "node_type": "Limit",
+        "total_cost": 6794.89,
+        "actual_rows": 8.0,
+        "shared_hits": 1182,
+        "shared_reads": 0,
+        "startup_cost": 972.16,
+        "estimated_rows": 100,
+        "removed_by_filter": null
+      },
+      {
+        "index": "wot_chunks_2_5m_embedding_idx",
+        "node_type": "Index Scan",
+        "total_cost": 3959146.91,
+        "actual_rows": 8.0,
+        "shared_hits": 1182,
+        "shared_reads": 0,
+        "startup_cost": 972.16,
+        "estimated_rows": 67978,
+        "removed_by_filter": 59
+      }
+    ],
+    "execution_ms": 1.318
+  },
+  {
+    "label": "ef40_off_k50",
+    "nodes": [
+      {
+        "index": null,
+        "node_type": "Limit",
+        "total_cost": 3883.52,
+        "actual_rows": 8.0,
+        "shared_hits": 1188,
+        "shared_reads": 0,
+        "startup_cost": 972.16,
+        "estimated_rows": 50,
+        "removed_by_filter": null
+      },
+      {
+        "index": "wot_chunks_2_5m_embedding_idx",
+        "node_type": "Index Scan",
+        "total_cost": 3959146.91,
+        "actual_rows": 8.0,
+        "shared_hits": 1188,
+        "shared_reads": 0,
+        "startup_cost": 972.16,
+        "estimated_rows": 67978,
+        "removed_by_filter": 59
+      }
+    ],
+    "execution_ms": 3.944
+  },
+  {
+    "label": "ef40_strict_order_k100",
+    "nodes": [
+      {
+        "index": null,
+        "node_type": "Limit",
+        "total_cost": 6794.89,
+        "actual_rows": 100.0,
+        "shared_hits": 25507,
+        "shared_reads": 3,
+        "startup_cost": 972.16,
+        "estimated_rows": 100,
+        "removed_by_filter": null
+      },
+      {
+        "index": "wot_chunks_2_5m_embedding_idx",
+        "node_type": "Index Scan",
+        "total_cost": 3959146.91,
+        "actual_rows": 100.0,
+        "shared_hits": 25507,
+        "shared_reads": 3,
+        "startup_cost": 972.16,
+        "estimated_rows": 67978,
+        "removed_by_filter": 2840
+      }
+    ],
+    "execution_ms": 37.221
+  },
+  {
+    "label": "ef40_strict_order_k50",
+    "nodes": [
+      {
+        "index": null,
+        "node_type": "Limit",
+        "total_cost": 3883.52,
+        "actual_rows": 50.0,
+        "shared_hits": 20764,
+        "shared_reads": 2870,
+        "startup_cost": 972.16,
+        "estimated_rows": 50,
+        "removed_by_filter": null
+      },
+      {
+        "index": "wot_chunks_2_5m_embedding_idx",
+        "node_type": "Index Scan",
+        "total_cost": 3959146.91,
+        "actual_rows": 50.0,
+        "shared_hits": 20764,
+        "shared_reads": 2870,
+        "startup_cost": 972.16,
+        "estimated_rows": 67978,
+        "removed_by_filter": 1414
+      }
+    ],
+    "execution_ms": 72.406
+  },
+  {
+    "label": "metadata_sort_cost_only_k100",
+    "nodes": [
+      {
+        "index": null,
+        "node_type": "Limit",
+        "total_cost": 59769.26,
+        "actual_rows": null,
+        "shared_hits": null,
+        "shared_reads": null,
+        "startup_cost": 59757.28,
+        "estimated_rows": 100,
+        "removed_by_filter": null
+      },
+      {
+        "index": null,
+        "node_type": "Gather Merge",
+        "total_cost": 67896.36,
+        "actual_rows": null,
+        "shared_hits": null,
+        "shared_reads": null,
+        "startup_cost": 59757.28,
+        "estimated_rows": 67976,
+        "removed_by_filter": null
+      },
+      {
+        "index": null,
+        "node_type": "Sort",
+        "total_cost": 58799.71,
+        "actual_rows": null,
+        "shared_hits": null,
+        "shared_reads": null,
+        "startup_cost": 58757.22,
+        "estimated_rows": 16994,
+        "removed_by_filter": null
+      },
+      {
+        "index": null,
+        "node_type": "Bitmap Heap Scan",
+        "total_cost": 58107.73,
+        "actual_rows": null,
+        "shared_hits": null,
+        "shared_reads": null,
+        "startup_cost": 593.26,
+        "estimated_rows": 16994,
+        "removed_by_filter": null
+      },
+      {
+        "index": "wot_chunks_2_5m_expr_idx",
+        "node_type": "Bitmap Index Scan",
+        "total_cost": 576.26,
+        "actual_rows": null,
+        "shared_hits": null,
+        "shared_reads": null,
+        "startup_cost": 0.0,
+        "estimated_rows": 67978,
+        "removed_by_filter": null
+      }
+    ],
+    "execution_ms": null
+  },
+  {
+    "label": "metadata_sort_cost_only_k50",
+    "nodes": [
+      {
+        "index": null,
+        "node_type": "Limit",
+        "total_cost": 59678.3,
+        "actual_rows": null,
+        "shared_hits": null,
+        "shared_reads": null,
+        "startup_cost": 59672.31,
+        "estimated_rows": 50,
+        "removed_by_filter": null
+      },
+      {
+        "index": null,
+        "node_type": "Gather Merge",
+        "total_cost": 67811.39,
+        "actual_rows": null,
+        "shared_hits": null,
+        "shared_reads": null,
+        "startup_cost": 59672.31,
+        "estimated_rows": 67976,
+        "removed_by_filter": null
+      },
+      {
+        "index": null,
+        "node_type": "Sort",
+        "total_cost": 58714.74,
+        "actual_rows": null,
+        "shared_hits": null,
+        "shared_reads": null,
+        "startup_cost": 58672.25,
+        "estimated_rows": 16994,
+        "removed_by_filter": null
+      },
+      {
+        "index": null,
+        "node_type": "Bitmap Heap Scan",
+        "total_cost": 58107.73,
+        "actual_rows": null,
+        "shared_hits": null,
+        "shared_reads": null,
+        "startup_cost": 593.26,
+        "estimated_rows": 16994,
+        "removed_by_filter": null
+      },
+      {
+        "index": "wot_chunks_2_5m_expr_idx",
+        "node_type": "Bitmap Index Scan",
+        "total_cost": 576.26,
+        "actual_rows": null,
+        "shared_hits": null,
+        "shared_reads": null,
+        "startup_cost": 0.0,
+        "estimated_rows": 67978,
+        "removed_by_filter": null
+      }
+    ],
+    "execution_ms": null
+  }
+]

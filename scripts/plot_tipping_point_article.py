@@ -238,7 +238,7 @@ def plot_all_books_single_ef(df: pd.DataFrame, ef_search: int = 40) -> None:
 
     ax.set_title(
         f"Filtered Vector Search Cliff — All 16 Book Filters (ef_search = {ef_search})\n"
-        "The planner abandons HNSW at the same top_k regardless of filter selectivity",
+        "Without filter statistics, every book gets the same row estimate and switches at the same top_k",
         fontsize=15, color=T.text, fontweight="bold", pad=20,
     )
 
@@ -426,7 +426,7 @@ def plot_ef_search_impact(book_name: str = REPRESENTATIVE_BOOK) -> None:
 
     ax.set_title(
         f"Impact of ef_search on the Filtered Search Cliff — \"{clean_name}\"\n"
-        "Raising ef_search makes the planner abandon HNSW at a lower top_k",
+        "Without filter statistics, raising ef_search makes the planner abandon HNSW at a lower top_k",
         fontsize=15, color=T.text, fontweight="bold", pad=20,
     )
 
