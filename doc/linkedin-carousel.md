@@ -4,7 +4,7 @@ This file is the complete brief for the LinkedIn post images: how to produce the
 
 The images are the first of three layers. They give a seven-page tour of the investigation that takes ten to fifteen minutes with the post text. The [article](article.md) is the second layer, with the theory, every query plan and every workaround. The repository is the third: setup guide, manifests, benchmark code and raw results. The last page says so.
 
-Repository: `<REPO_URL>`
+Repository: `github.com/tharindu-sankalpa/pgvector-filtering-investigation`
 
 ## How to produce it
 
@@ -81,7 +81,7 @@ Four numbered lines, numerals 48 px in indigo, text 30 px:
 
 A row of four technology badges: `Amazon EKS 1.36` · `CloudNativePG 1.30.1` · `PostgreSQL 18.6` · `pgvector 0.8.7`
 
-Repository line, monospace, 26 px: `<REPO_URL>`
+Repository line, monospace, 26 px: `github.com/tharindu-sankalpa/pgvector-filtering-investigation`
 
 Footer, indigo italic, 26 px: `A seven-image tour. The article has the full investigation. Swipe →`
 
@@ -175,7 +175,7 @@ Then three rows under the heading `Read more`, each a card with a bold label and
 
 - **This post** — the trap and the fix in seven images.
 - **The article** — HNSW, B-tree and GIN internals, every EXPLAIN plan, why the usual workarounds fail. Link in the post text.
-- **The repository** — EKS setup guide, CNPG manifests, benchmark Jobs, raw results. `<REPO_URL>`
+- **The repository** — EKS setup guide, CNPG manifests, benchmark Jobs, raw results. `github.com/tharindu-sankalpa/pgvector-filtering-investigation`
 
 ---
 

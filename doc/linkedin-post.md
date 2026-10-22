@@ -1,4 +1,4 @@
-Post text for the seven-image LinkedIn post. Replace `<REPO_URL>` and `<ARTICLE_URL>` before posting.
+Post text for the seven-image LinkedIn post. Replace `<ARTICLE_URL>` before posting.
 
 ---
 
@@ -17,6 +17,6 @@ Two problems survive the fix. Without iterative index scans, filtered queries ca
 The images walk through the setup, the trap, the cause and the fix. The article has every query plan and why the usual workarounds don't help; the repository has the EKS setup guide, manifests, benchmark code and raw results.
 
 Article: <ARTICLE_URL>
-Repo: <REPO_URL>
+Repo: github.com/tharindu-sankalpa/pgvector-filtering-investigation
 
 #PostgreSQL #pgvector #Kubernetes #AmazonEKS #VectorSearch #DatabasePerformance
