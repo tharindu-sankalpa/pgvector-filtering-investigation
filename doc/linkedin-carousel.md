@@ -11,8 +11,8 @@ Repository: `github.com/tharindu-sankalpa/pgvector-filtering-investigation`
 ## How to produce it
 
 1. **Generate the two diagrams** from [diagrams/prompts.md](diagrams/prompts.md) (`li-architecture.png`, `li-planner-switch.png`, 3:4 portrait) and save them under `doc/linkedin/diagrams/`. Both exist at 1792 × 2400. Review each against its prompt's FINAL CHECK before use.
-2. **Capture and crop the screenshots** listed in [SCREENSHOT_PLAN.md](SCREENSHOT_PLAN.md), section D, into `doc/screenshots/crops/`, and view every crop. This brief uses `02-eks-node-groups.png` and `d03-trap-limit-41-bitmap.png`.
-3. **Give Claude Design this file** plus the two diagrams and the two crops. Say: "Read this file in full and follow it exactly; add nothing that is not in it; place the images unaltered; run its closing checklist and report each item."
+2. **Use the screenshot crop** `doc/screenshots/crops/02-eks-node-groups-table.png` (page 3). Page 6 uses a code card instead of a screenshot.
+3. **Give Claude Design this file** plus the two diagrams and the one crop. Say: "Read this file in full and follow it exactly; add nothing that is not in it; place the images unaltered; run its closing checklist and report each item."
 4. **Export a PDF** of ten pages, each **1080 × 1440 px (3:4 portrait)**, no bleed. Name it `pgvector-production-traps.pdf`. (`doc/pgvector-filtered-search-trap.pdf` is the export of the earlier seven-page brief and is superseded.)
 5. **Convert the PDF to ten PNGs** at exactly 1080 × 1440:
 
@@ -35,8 +35,10 @@ This post differs from the skill's default in three ways. Keep these choices in 
 
 ## What earlier versions got wrong
 
-- A first set of seven images was generated as whole pages by an image model. None of them stated the finding, there was no evidence from the live system, and type sizes and spacing varied across the set. The design tool now draws every page, and pages 3 and 6 carry real AWS console and DBeaver crops.
+- A first set of seven images was generated as whole pages by an image model. None of them stated the finding, there was no evidence from the live system, and type sizes and spacing varied across the set. The design tool now draws every page, page 3 carries a real AWS console crop and page 6 the EXPLAIN ANALYZE lines from the recorded run.
 - A first brief described the filtered-search cliff as a planner flaw without a fix. The investigation found the cause (missing statistics for the filter expression) and the fix (`ANALYZE`); the pages follow that story.
+- The first Claude Design version placed two wide screenshots at full page width; their text rendered at about 7 px and was unreadable on a phone. Page 3 now uses a tight crop of the node-group table, and page 6 shows the key plan lines as a code card.
+- The plan page showed 358 ms in the tile but a screenshot of a different run (382 ms). The code card now quotes the same run as the tile and the cover.
 - The seven-page brief put the `ANALYZE` finding on the cover as the whole story. The work is a production-style deployment and a benchmark across concurrency, result size and three search patterns, which exposed three traps; one `ANALYZE` number on the cover undersold the rest and overstated one finding. The cover now states what was built and measured, and names the three traps and which have fixes.
 - Concurrency is stated as what was measured, 1 to 100 concurrent clients. The benchmark did not test thousands of concurrent users and no page claims it.
 
@@ -63,8 +65,8 @@ Design ten pages for a LinkedIn multi-image post. Each page is **1080 × 1440 px
   Fills are very pale tints (#EEF2FF, #FFF1F2, #F0FDF4, #FFFBEB). Never a saturated block.
 - **Cards and stat tiles:** white fill, solid 3 px outline #334155, 12 px radius, 6 px coloured left accent bar, number or name in bold. They must read as solid boxes at phone size, not hairline frames.
 - **Diagrams** (pages 2 and 7): the PNG from `doc/linkedin/diagrams/` placed unaltered, centred, as large as the space between headline and page number allows, without a frame, without cropping or recolouring, and with no text added on or under it.
-- **Screenshots** (pages 3 and 6): the crops from `doc/screenshots/crops/` placed unaltered at full content width (952 px) inside a card with the 3 px outline and 12 px radius. A caption of at most two lines sits beneath each one, in secondary text, 24 px. Screenshot text may be smaller than body text; the caption carries the facts.
-- **Code card** (page 8): dark card #1E293B, light text, header line naming what it is, no line numbers.
+- **Screenshot** (page 3): the crop from `doc/screenshots/crops/` placed unaltered at full content width (952 px) inside a card with the 3 px outline and 12 px radius. A caption of at most two lines sits beneath it, in secondary text, 24 px.
+- **Code cards** (pages 6 and 8): dark card #1E293B, light text, header line naming what it is, no line numbers, the lines named under each card highlighted with a faint amber band. Code at least 24 px; keep line breaks and indentation exactly as given.
 - **Technology badges** on page 1 only: text badges (name and version in a 3 px outlined pill), no logos.
 - Plenty of empty space.
 
@@ -109,7 +111,7 @@ Three cards, stacked, bold name then two lines at 28 px:
 - **Benchmark Jobs · m6i.2xlarge** (indigo accent) — 8 vCPU, 32 GiB. Parquet datasets staged from S3 to EBS and checksummed before the timed run.
 - **Operator, results, monitoring · m6i.xlarge** (indigo accent) — 4 vCPU, 16 GiB. CNPG operator, results database, Prometheus and Grafana.
 
-Screenshot card: `doc/screenshots/crops/02-eks-node-groups.png`.
+Screenshot card: `doc/screenshots/crops/02-eks-node-groups-table.png`.
 Caption: `Amazon EKS console, cluster pgvector-investigation in ap-south-1: three node groups, one per role.`
 `Database traffic stays inside the cluster; administrative access is kubectl port-forward.`
 
@@ -161,9 +163,25 @@ A row of two stat tiles, equal width:
 
 One line under the tiles, secondary text: `Without statistics, filtered search at 50 clients and top_k 50 averaged 7,999 ms, and 85% of the top_k 50 and 100 queries timed out.`
 
-Screenshot card: `doc/screenshots/crops/d03-trap-limit-41-bitmap.png`.
-Caption: `EXPLAIN ANALYZE in DBeaver at LIMIT 41: the planner expects rows=12500,`
-`the Bitmap Heap Scan reads 63,945, then sorts every distance.`
+Code card, full content width, header `EXPLAIN ANALYZE at LIMIT 41 · shortened`:
+
+```
+Limit  (actual time=358.105..358.111 rows=41 loops=1)
+  ->  Sort  (actual time=358.104..358.106 rows=41 loops=1)
+        Sort Key: (embedding <=> query_vector)
+        ->  Bitmap Heap Scan on wot_chunks_2_5m
+              (cost=109.41..13160.49 rows=12500 width=16)
+              (actual time=11.344..348.928 rows=63945 loops=1)
+              Heap Blocks: exact=50143
+              ->  Bitmap Index Scan on wot_chunks_2_5m_expr_idx
+                    (actual time=4.042..4.043 rows=63945 loops=1)
+Execution Time: 358.129 ms
+```
+
+Highlight the lines `(cost=109.41..13160.49 rows=12500 width=16)`, `(actual time=11.344..348.928 rows=63945 loops=1)` and `Execution Time: 358.129 ms`.
+
+Caption under the card, secondary text: `The planner expected rows=12500. The Bitmap Heap Scan read 63,945,`
+`then sorted every distance.`
 
 ### Page 7 · trap 1, the root cause
 
@@ -256,7 +274,8 @@ Then three rows under the heading `Read more`, each a card with a bold label and
 - [ ] Every number on pages 1, 3, 4, 5, 6, 8 and 9 matches the article and the sources table above.
 - [ ] Page 2 diagram: eight cards, seven arrows, one boundary, no load balancer.
 - [ ] Page 7 diagram: one query card, two estimate cards, two plan cards, four arrows, no latency numbers.
-- [ ] Both screenshot crops keep the console or DBeaver header and contain no account ID, public IP, email or password.
+- [ ] The page 3 crop contains no account ID, public IP, email or password, and its text is readable at phone width.
+- [ ] The page 6 code card matches the brief line for line, with the three lines highlighted.
 - [ ] Kicker, headline and page number "n/10" present on all ten pages; no page overflowed.
 - [ ] Concurrency is stated as 1 to 100 clients everywhere; no page claims thousands of users.
 - [ ] The repository URL is written out on pages 1 and 10; the post text has both links.
