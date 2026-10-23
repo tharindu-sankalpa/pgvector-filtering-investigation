@@ -515,24 +515,9 @@ Two inputs drive every one of those estimates: the price of each step, and **how
 
 For the HNSW path, pgvector supplies its own cost estimate. It estimates the work of a complete graph scan from the number of rows in the table, `m` and `ef_search`, then the planner scales that cost down by how many of the expected matching rows a `LIMIT` needs. The fewer rows the planner expects to pass the filter, the more of the graph it assumes must be scanned to fill the `LIMIT`, and the more expensive HNSW looks.
 
-```mermaid
-flowchart TD
-    subgraph "Query Planner Decision"
-        Q["Filtered Vector Search Query<br/>WHERE book_name = 'X' ORDER BY distance LIMIT N"]
-        Q --> E["Estimate: how many rows<br/>match book_name = 'X'?"]
-        E --> SA["Strategy A:<br/>HNSW Index Scan + Post-Filter"]
-        E --> SB["Strategy B:<br/>B-Tree Index Scan + Brute-Force Sort"]
-        SA --> CA["Estimated cost rises with LIMIT,<br/>faster when few rows are expected to match"]
-        SB --> CB["Estimated cost grows with<br/>the expected number of matches"]
-        CA --> D{"Compare<br/>costs"}
-        CB --> D
-        D -->|"Accurate estimate"| WIN_A["Choose Strategy A<br/>(HNSW - FAST)"]
-        D -->|"Estimate far too low,<br/>LIMIT above the tipping point"| WIN_B["Choose Strategy B<br/>(Brute-force - SLOW)"]
-    end
-
-    style WIN_A fill:#22c55e,color:#fff
-    style WIN_B fill:#ef4444,color:#fff
-```
+<p align="center">
+  <img src="doc/diagrams/planner-decision.png" alt="Query planner decision for a filtered vector search: the row estimate drives the cost comparison between an HNSW index scan with post-filter and a B-tree bitmap scan with brute-force sort" />
+</p>
 
 ### Table Statistics: How the Planner Guesses Row Counts
 
@@ -676,19 +661,9 @@ Execution Time: 358.129 ms
 
 **What is happening here**: One more requested row, and PostgreSQL completely abandoned the HNSW index. Instead, it executed a three-step plan:
 
-```mermaid
-flowchart TD
-    subgraph "The Catastrophic Plan (LIMIT 41)"
-        S1["Step 1: Bitmap Index Scan<br/>B-Tree on metadata->>'book_name'<br/>Finds all 63,945 matching row IDs<br/>Time: 4 ms"]
-        S2["Step 2: Bitmap Heap Scan<br/>Fetches all 63,945 rows and their TOASTed embeddings<br/>50,143 heap blocks, 305,980 buffer pages"]
-        S3["Step 3: Sort<br/>Cosine distance on ALL 63,945 rows<br/>1,536 dimensions x 63,945 rows = brute force<br/>Steps 2 and 3: ~350 ms warm"]
-        S4["Step 4: Limit<br/>Pick top 41 from sorted results"]
-
-        S1 --> S2 --> S3 --> S4
-    end
-
-    style S3 fill:#ef4444,color:#fff
-```
+<p align="center">
+  <img src="doc/diagrams/limit-41-plan-steps.png" alt="The LIMIT 41 plan step by step: bitmap index scan, bitmap heap scan over 63,945 rows, brute-force cosine distance sort, then limit; 358 ms total" />
+</p>
 
 1. **Bitmap Index Scan** on the B-tree `wot_chunks_2_5m_expr_idx`: finds all 63,945 row IDs matching `book_name = '00. New Spring'` in 4 ms
 2. **Bitmap Heap Scan**: fetches all 63,945 rows (50,143 heap blocks, 305,980 buffer pages including the out-of-line embeddings)
@@ -987,21 +962,9 @@ Execution Time: 595.917 ms
 
 Here is what happens step by step:
 
-```mermaid
-flowchart TD
-    subgraph "Text Search CTE Execution"
-        S1["Step 1: GIN Bitmap Index Scan<br/>Finds all 76,198 rows matching 'dragon'<br/>Time: 14 ms"]
-        S2["Step 2: Parallel Bitmap Heap Scan<br/>4 workers + leader fetch ALL 76,198 rows<br/>~12,000 heap blocks each"]
-        S3["Step 3: ts_rank() computation<br/>Re-tokenizes content and scores<br/>ALL 76,198 rows (done during heap scan)<br/>Steps 2 and 3: ~560 ms"]
-        S4["Step 4: Sort<br/>Each process sorts its ~15,000 scored rows"]
-        S5["Step 5: Gather Merge + WindowAgg<br/>Merge the sorted streams,<br/>apply ROW_NUMBER, return top 20"]
-
-        S1 --> S2 --> S3 --> S4 --> S5
-    end
-
-    style S2 fill:#ef4444,color:#fff
-    style S3 fill:#ef4444,color:#fff
-```
+<p align="center">
+  <img src="doc/diagrams/text-search-cte-steps.png" alt="Text search CTE execution: GIN bitmap index scan, parallel bitmap heap scan over 76,198 rows, ts_rank on every row, per-process sort, gather merge and ROW_NUMBER; 596 ms total" />
+</p>
 
 The bottleneck is steps 2 and 3. PostgreSQL must:
 

@@ -1,6 +1,6 @@
 # Diagram prompts (Nano Banana Pro)
 
-Prompts for the diagrams that change for the EKS environment. These use the `diagram` skill's visual-only approach: only quoted text is printed, everything else is private direction.
+Prompts for every image-model figure in the article and README, and for the LinkedIn carousel. These use the `diagram` skill's visual-only approach: only quoted text is printed, everything else is private direction.
 
 **Project preference: no standalone titles inside diagram images.** Start directly with the diagram content; do not reserve an empty title band. Component names, boundary labels and section labels remain. The surrounding article or README supplies the figure heading. This explicitly overrides the skill's default requirement for a large title.
 
@@ -8,8 +8,8 @@ Output formats:
 
 | Set | Files | Aspect ratio | Why |
 |---|---|---|---|
-| Article and README prompts in this file | Six `doc/diagrams/*.png` figures below | **3:2 landscape**, at least 3072 × 2048 | Gives technical labels and connection routes enough width, with a consistent appearance across the rewritten set. |
-| LinkedIn carousel | `doc/linkedin/diagrams/*.png` | **4:5 portrait**, at least 1600 × 2000 | Larger type and fewer details for phone viewing; fits the carousel's image slot. |
+| Article and README prompts in this file | Sixteen image-model `doc/diagrams/*.png` figures below (the distribution chart is scripted) | **16:9 landscape**, 2752 × 1536 (the generator's 2K landscape output; the accepted figures use it) | Gives technical labels and connection routes enough width, with a consistent appearance across the set. The prompts say 3:2 as a fallback; the generator's 2K setting wins. Convert JPG output to PNG under the target filename. |
+| LinkedIn multi-image post | Two `doc/linkedin/diagrams/li-*.png` diagrams below, placed on pages 2 and 7 of the ten pages that Claude Design builds from [linkedin-carousel.md](../linkedin-carousel.md) | **3:4 portrait**, 1792 × 2400 (the accepted files) | Larger type and fewer details for phone viewing; matches the 1080 × 1440 pages. The two prompts still say 4:5 / 1600 × 2000; set 3:4 in the generator. |
 
 Set the aspect ratio in the generator's settings, not only in the prompt, and check the exported dimensions.
 
@@ -57,12 +57,21 @@ One palette for both sets, so a component looks the same in the article and the 
 | `Two-Compounding-Problems.png` | **Generated 22 Oct, accepted, embedded.** |
 | `planner-row-estimates.png` | **Generated 22 Oct, accepted, embedded.** Concept diagram for the "Table statistics" section. |
 | `b-tree-index-and-bitmap-heap.png` | **Generated 22 Oct, accepted, embedded.** |
-| `HNSW-Post-Filtering.png`, `iterative_scan.png`, `ef_search.png`, `ef_construction.png`, `m-Parameter.png`, `book-filter-distribution.png`, `hnsw-graph.html` | Keep. Platform-independent mechanisms and dataset facts. |
-| `gin-index.png`, `search-patterns.png` | Keep. Optional later rewrite with invented sample sentences instead of corpus text. |
+| `book-filter-distribution.png` | **Generated 23 Oct from the numbered fallback prompt, accepted, installed.** Known issues: the unrecorded bars are schematic, the 209,226 bar ends near 170k on its axis, and the 168,426 label sits on Book 14 rather than Book 13. `scripts/plot_book_distribution.py` produces an exact version when the database is available. |
+| `search-patterns.png` | **Generated 23 Oct, accepted, installed.** Known minor issue: `metadata->>"book_name"` printed with double quotes instead of single. |
+| `ef_construction.png`, `ef_search.png` | **Generated 23 Oct, accepted, installed.** |
+| `m-Parameter.png` | **Generated 23 Oct (second attempt), accepted, installed.** |
+| `HNSW-Post-Filtering.png` | **Generated 23 Oct, accepted, installed.** Known minor issues: the expansion is drawn as three joined red arrows, and five matches are shown instead of four. |
+| `iterative_scan.png` | **Generated 23 Oct, accepted, installed.** |
+| `gin-index.png` | **Generated 23 Oct, accepted, installed.** Known minor issue: the "(76,198 IDs)" tag sits slightly below the dragon row. |
+| `planner-decision.png` | **Generated 23 Oct, accepted, installed.** Known minor issue: the legend prints "HNSW pat" (truncated). |
+| `limit-41-plan-steps.png` | **Generated 23 Oct, accepted, installed.** Known minor issues: "4 px" printed in three arrow labels and "2%" under the timing bar. |
+| `text-search-cte-steps.png` | **Generated 23 Oct, accepted, installed.** |
+| `hnsw-graph.html` | Keep. Interactive figure; `doc/plots/hnsw-graph.png` is its static export, not image-model work. |
 | `doc/plots/*.png` | Not image-model work. Regenerate with `scripts/plot_article_benchmarks.py` from the EKS results. |
 | `doc/screenshots/**` | Not image-model work. Capture from the live system per [SCREENSHOT_PLAN.md](../SCREENSHOT_PLAN.md). |
-| `doc/linkedin/diagrams/li-architecture.png` | **Generated 22 Oct, accepted.** Carousel page 2. |
-| `doc/linkedin/diagrams/li-planner-switch.png` | **Generated 22 Oct, accepted.** Carousel page 5. |
+| `doc/linkedin/diagrams/li-01-architecture.jpg` .. `li-10-production-checklist.jpg` | **Generated 23 Oct (3:4 portrait).** Ten-image LinkedIn post walkthrough replacing the PDF carousel workflow. |
+| `doc/linkedin/diagrams/li-architecture.png`, `li-planner-switch.png` | Earlier two-diagram portrait references. |
 
 ---
 
@@ -448,7 +457,515 @@ Two upper cards, three phase panels, six directed arrows. Exact bitmap entries c
 
 ---
 
-## li-architecture.png (LinkedIn, 4:5)
+## book-filter-distribution.png
+
+**Status: generated by script, not by the image model.** The image generator rejected the prompt that listed all sixteen book titles with a policy failure (the two titles already used in accepted prompts pass; the full list of recognisable copyrighted titles does not). A bar chart also needs exact proportions, which the image model cannot promise. Use [plot_book_distribution.py](../../scripts/plot_book_distribution.py):
+
+```bash
+export $(grep -v '^#' .env.aws | xargs)
+uv run python scripts/plot_book_distribution.py            # queries the vector database
+uv run python scripts/plot_book_distribution.py --csv doc/results/book-row-counts.csv   # or from a saved CSV (book_name,rows)
+```
+
+It writes `doc/diagrams/book-filter-distribution.png` at 3:2, in the shared palette: slate bars, red for the smallest book, indigo for the largest, counts printed in muted ink, no title. Save the query output as a CSV under `doc/results/` so the figure can be regenerated without the cluster.
+
+**What it shows:** the row count of each of the 16 `book_name` values in the 2.5 million row table in book order, so a reader sees why `00. New Spring` (63,945 rows, 2.6%) is the most selective filter and `06. Lord of Chaos` (209,226 rows, 8.4%) the least. Only three counts are recorded in this repository (the third is `13. Towers of Midnight`, 168,426); the current image invents the rest and duplicates "00. New Spring (prequel)" as a 16th bar, which contradicts the text.
+
+**Evidence:** [recorded counts for three books](../results/eks-20261022-fixed-stats.txt) (section 1b), [DATASET.md](../DATASET.md), and the per-book count query in [perf_audit_pgvector_2.5m_wot.sql](../../scripts/perf_audit_pgvector_2.5m_wot.sql).
+
+**Fallback image-model prompt** (only if the script route is unavailable). It avoids the policy trigger by printing the two annotated titles only and numbering the other bars; fill the bar lengths from the query output first. Bars without a printed count stay schematic.
+
+```text
+Create a polished horizontal bar chart on pure white, 3:2 landscape at 3072 × 2048 or higher. Begin directly with the chart. No standalone title, subtitle or empty title band. Instructions are private; print only the quoted labels below, once each.
+
+VISUAL STYLE — PRIVATE:
+Restrained engineering-whitepaper styling: flat bars, thin #CBD5E1 axis lines, hairline vertical gridlines only, no shadows, gradients, 3D or decorative background. Inter-like sans-serif: row labels regular #0F172A at least 32 px, axis ticks #475569 at least 28 px, value annotations semibold at least 30 px. Left-align the row labels in one column.
+Bars are slate #94A3B8 except the smallest, which is red #B91C1C, and the largest, which is indigo #4F46E5.
+
+SPATIAL LAYOUT — PRIVATE:
+Use 4% margins. A label column on the left about one fifth of the width, then the bar area. Exactly sixteen bars with equal heights and gaps, top to bottom in the order listed. The x axis runs along the bottom from 0 to 250k with ticks at 0, 50k, 100k, 150k, 200k and 250k. Leave a narrow footer for one note and a compact legend.
+Bar lengths follow the row counts supplied with this prompt; the first bar is the shortest and the seventh is the longest.
+
+EXACT TEXT LABELS — PRIVATE:
+Row labels, top to bottom: "00. New Spring", "Book 01", "Book 02", "Book 03", "Book 04", "Book 05", "06. Lord of Chaos", "Book 07", "Book 08", "Book 09", "Book 10", "Book 11", "Book 12", "Book 13", "Book 14", "Book 15".
+X axis caption: "Rows per book_name value".
+Annotation after the first bar: "63,945 rows · 2.6% · most selective".
+Annotation after the seventh bar: "209,226 rows · 8.4% · least selective".
+Annotation after the fourteenth bar: "168,426 rows".
+Print a count after any other bar only if the supplied table gives one.
+
+VISUAL CONNECTIONS — PRIVATE:
+No arrows, leader lines or connectors. Annotations sit directly after their bar.
+
+CALLOUTS — PRIVATE:
+Footer-left, one quiet line: "16 distinct values · 2,500,000 rows total · uneven by design".
+
+LEGEND — PRIVATE:
+Bottom-right, a small white outlined box with three swatches: red "Smallest book", indigo "Largest book", slate "Other books". No heading.
+
+FINAL CHECK — PRIVATE, DO NOT PRINT:
+Exactly sixteen bars and sixteen distinct labels; only two full titles are printed. The red bar is the shortest and the indigo bar the longest. No invented counts. No standalone title, banner, arrows or rendering syntax.
+```
+
+---
+
+## search-patterns.png
+
+**What it shows:** one row of the 4,373-row query dataset and how the three benchmark search patterns consume it unchanged: vector search uses the embedding alone, filtered search adds the `book_name` filter value, hybrid search adds the keyword list for full-text scoring with Reciprocal Rank Fusion. The example values are the ones in the current image.
+
+**Evidence:** [query dataset schema](../DATASET.md), [retrieval benchmark](../../src/pgvector/03_retrieval_asyncpg.py), and the README section "The Benchmark".
+
+**Prompt:**
+
+```text
+Create a polished technical flow diagram on pure white, 3:2 landscape at 3072 × 2048 or higher. Begin directly with the cards. No standalone title, subtitle or empty title band. Instructions are private; print only the quoted labels below, once each.
+
+VISUAL STYLE — PRIVATE:
+Restrained engineering-whitepaper styling: flat compact cards, small colored icon tabs, fine outlines, pale fills, modest uniform corners, no shadows, gradients or decorative background. Inter-like sans-serif: semibold #0F172A card names about 40 px, regular #475569 descriptions at least 30 px, arrow labels at least 30 px. Field names and values use readable monospace. Left-align text with even padding.
+The query-row card is slate on #F8FAFC with a slate icon tab. The three pattern cards use indigo #4F46E5 on #EEF2FF for vector search, amber #B45309 on #FFFBEB for filtered search, and green #15803D on #F0FDF4 for hybrid search. Small matching outline icons: table row, network graph, filter funnel, merged streams. All icons share a 40 px size and stroke.
+
+SPATIAL LAYOUT — PRIVATE:
+Use 4% margins. One tall query-row card occupies the left third of the canvas, vertically centered. Three equal pattern cards are stacked in the right half with equal gaps, their combined height matching the query-row card. A generous central gutter carries the three arrows and their labels. Leave a narrow footer for one note.
+
+EXACT TEXT LABELS — PRIVATE:
+Query-row card name: "One query row". Below it, four monospace field groups separated by small gaps:
+"query_text:" then "\"What is the Dragon Reborn's true name?\"";
+"query_embedding:" then "[1,536-dim vector]";
+"keywords:" then "[\"Dragon\", \"Reborn\", \"true\", \"name\"]";
+"filter_value:" then "\"01. The Eye of the World\"".
+Top pattern card name: "Vector search", with two lines "query_embedding only" and "Nearest neighbors by cosine distance. No filter.".
+Middle pattern card name: "Filtered search", with two lines "query_embedding + filter_value" and "Nearest neighbors within one book via metadata->>'book_name'.". The quotation marks around book_name are straight single quotes, as in SQL; never double quotes.
+Bottom pattern card name: "Hybrid search", with two lines "query_embedding + keywords" and "Vector and full-text ranks fused with RRF. No filter.".
+
+VISUAL CONNECTIONS — PRIVATE:
+Exactly three directed arrows, each with one small filled destination head and a short label on a white backing in the gutter. Each arrow leaves the right edge of the query-row card at the height of its destination card and enters the left edge of that card. Use 4 px solid indigo for the top arrow, 4 px solid amber for the middle arrow and 4 px solid green for the bottom arrow.
+1. To Vector search, label "embedding".
+2. To Filtered search, label "embedding + filter".
+3. To Hybrid search, label "embedding + keywords".
+No other connectors.
+
+CALLOUTS — PRIVATE:
+Footer, one quiet line: "4,373 query rows · each row used unmodified in all three patterns".
+
+LEGEND — PRIVATE:
+None; the arrow labels and card names are sufficient.
+
+FINAL CHECK — PRIVATE, DO NOT PRINT:
+One query-row card, three pattern cards, three arrows. Field values are printed exactly, with quotation marks where given; book_name is wrapped in straight single quotes. No standalone title, no legend, no extra icons, no rendering syntax.
+```
+
+---
+
+## m-Parameter.png
+
+**What it shows:** the HNSW `m` parameter as the maximum number of edges a node keeps to its neighbors within a layer, comparing a low setting with the benchmark default of 16. Each greedy search hop evaluates the current node's neighbors, so `m` shapes graph connectivity, build time, memory and per-hop search cost. The two panels are neutral alternatives; neither is a failure.
+
+**Evidence:** [pgvector HNSW options](https://github.com/pgvector/pgvector#hnsw), the README section "HNSW Index", and the index build settings in [02_create_indexes.py](../../src/pgvector/02_create_indexes.py).
+
+**Prompt:**
+
+```text
+Create a polished two-panel technical comparison on pure white, 3:2 landscape at 3072 × 2048 or higher. Begin directly with the panels. No standalone title, subtitle or empty title band. Instructions are private; print only the quoted labels below, once each.
+
+VISUAL STYLE — PRIVATE:
+Restrained engineering-whitepaper styling: thin panel outlines, pale fills, no shadows, gradients or decoration. Inter-like sans-serif: semibold #0F172A panel labels about 40 px, regular #475569 captions at least 30 px. Settings use readable monospace.
+Graph nodes are circles with a thin #475569 outline and a #F8FAFC fill; the center node in each panel is solid indigo #4F46E5. Edges are 3 px solid slate #64748B with no arrowheads. Both panels use the same neutral treatment; do not color one panel green and the other orange.
+
+SPATIAL LAYOUT — PRIVATE:
+Use 4% margins and two equal-width panels with a generous center gutter and a hairline divider. Each panel has a small local heading at the top, a centered star-shaped graph schematic in the middle, and a two-line caption near the bottom. Leave a narrow footer for one note.
+Left panel: one indigo center node with exactly four neighbor nodes spaced evenly around it, each joined to the center by one straight edge. No edges between neighbors, and no ring, circle or arc drawn through or around the neighbor nodes; the only lines are the four spokes.
+Right panel: one indigo center node with exactly sixteen neighbor nodes spaced evenly on one ring around it, each joined to the center by one edge. No edges between neighbors. Keep the ring large enough that edges remain distinct.
+
+EXACT TEXT LABELS — PRIVATE:
+Left heading: "Low m", with monospace "m = 4" beneath.
+Right heading: "Benchmark default", with monospace "m = 16" beneath.
+Left caption, two lines: "Each hop evaluates 4 neighbors.", "Cheaper hops · sparser graph · more dead ends".
+Right caption, two lines: "Each hop evaluates 16 neighbors.", "Costlier hops · denser graph · fewer dead ends".
+
+VISUAL CONNECTIONS — PRIVATE:
+The graph edges are the only lines. Exactly four edges in the left panel and sixteen in the right. No directed arrows anywhere.
+
+CALLOUTS — PRIVATE:
+Footer, one quiet line: "m is set at build time · affects build time, index memory and per-hop search cost".
+
+LEGEND — PRIVATE:
+None.
+
+FINAL CHECK — PRIVATE, DO NOT PRINT:
+Two panels, four and sixteen neighbors, twenty straight spokes in total, no arrowheads, no ring or circle through the neighbors in either panel. Neither panel is marked as good or bad. No claim about recall percentages or layer-specific edge counts. No standalone title, no icons, no rendering syntax.
+```
+
+---
+
+## ef_construction.png
+
+**What it shows:** `ef_construction` as the size of the candidate list searched when a new vector is inserted into the HNSW graph, before the best `m` neighbors are chosen as edges. A larger list evaluates more candidates and produces better edges at the cost of build time, and has no effect on query latency. The benchmark used the default of 64; the 2.5 million row build took 96 minutes.
+
+**Evidence:** [pgvector HNSW options](https://github.com/pgvector/pgvector#hnsw), and the README sections "The Benchmark" (recorded 96-minute build) and "HNSW Index".
+
+**Prompt:**
+
+```text
+Create a polished two-panel technical comparison on pure white, 3:2 landscape at 3072 × 2048 or higher. Begin directly with the panels. No standalone title, subtitle or empty title band. Instructions are private; print only the quoted labels below, once each.
+
+VISUAL STYLE — PRIVATE:
+Restrained engineering-whitepaper styling: thin panel outlines, pale fills, no shadows, gradients or decoration. Inter-like sans-serif: semibold #0F172A panel labels about 40 px, regular #475569 captions at least 30 px. Settings use readable monospace.
+Existing graph nodes are small circles with a thin #94A3B8 outline and #F8FAFC fill. The node being inserted is solid amber #B45309 with a thin dark outline. Candidate nodes evaluated during insertion are filled #CBD5E1. Chosen neighbors are solid indigo #4F46E5. The candidate region is a dashed 3 px #0369A1 circle with a very pale #EFF6FF fill. Chosen edges are 4 px solid indigo with no arrowheads.
+
+SPATIAL LAYOUT — PRIVATE:
+Use 4% margins and two equal-width panels with a generous center gutter and a hairline divider. Each panel has a small local heading, a point-cloud schematic of about forty evenly scattered nodes in the middle, and a two-line caption near the bottom. Leave a narrow footer for one note.
+Left panel: the amber node sits near the center. A small dashed circle around it encloses about six candidate nodes. Four of them are indigo and joined to the amber node by indigo edges. Nodes outside the circle are unchanged.
+Right panel: the same layout with a dashed circle about two and a half times the diameter, enclosing about twenty candidate nodes. Four of them, spread more evenly around the amber node, are indigo and joined by indigo edges. The number of chosen edges is the same in both panels.
+These counts are schematic; the panels illustrate a wider candidate search, not a measured number of visited nodes.
+
+EXACT TEXT LABELS — PRIVATE:
+Left heading: "Small candidate pool", with monospace "ef_construction = 64" beneath.
+Right heading: "Large candidate pool", with monospace "ef_construction = 256" beneath.
+Inside each dashed circle, near its edge, a small label: left "candidates searched", right the same words.
+Left caption, two lines: "Fewer candidates compared before choosing m edges.", "Faster build · edges may miss closer neighbors".
+Right caption, two lines: "More candidates compared before choosing m edges.", "Slower build · edges closer to the true neighbors".
+
+VISUAL CONNECTIONS — PRIVATE:
+The chosen edges are the only lines: four per panel, eight in total, no arrowheads. No directed arrows anywhere.
+
+CALLOUTS — PRIVATE:
+Footer, one quiet line: "Build-time only · no effect on query latency · benchmark used 64, build took 96 minutes".
+
+LEGEND — PRIVATE:
+Bottom-right, a small white outlined box with three swatches: amber "New vector", pale slate "Candidate evaluated", indigo "Chosen neighbor". No heading.
+
+FINAL CHECK — PRIVATE, DO NOT PRINT:
+Two panels, one amber node each, four indigo edges each, one dashed circle each with the right circle clearly larger. No arrowheads. Do not print a recall percentage or claim a specific number of candidates is visited. No standalone title, large banner or rendering syntax.
+```
+
+---
+
+## ef_search.png
+
+**What it shows:** `ef_search` as the size of the candidate queue used while exploring layer 0 at query time. A small queue stops exploring sooner and is faster; a large queue explores more of the neighborhood for better recall at higher latency. It is a session setting and must be at least `top_k`. Visited-node counts in the drawing are schematic.
+
+**Evidence:** [pgvector query options](https://github.com/pgvector/pgvector#query-options), the README section "HNSW Index", and `SET hnsw.ef_search` usage in [03_retrieval_asyncpg.py](../../src/pgvector/03_retrieval_asyncpg.py).
+
+**Prompt:**
+
+```text
+Create a polished two-panel technical comparison on pure white, 3:2 landscape at 3072 × 2048 or higher. Begin directly with the panels. No standalone title, subtitle or empty title band. Instructions are private; print only the quoted labels below, once each.
+
+VISUAL STYLE — PRIVATE:
+Restrained engineering-whitepaper styling: thin panel outlines, pale fills, no shadows, gradients or decoration. Inter-like sans-serif: semibold #0F172A panel labels about 40 px, regular #475569 captions at least 30 px. Settings use readable monospace.
+Graph nodes are small circles with a thin #94A3B8 outline and #F8FAFC fill, joined by hairline #CBD5E1 edges with no arrowheads to form an irregular mesh. The query position is a small red #B91C1C cross, not a node. Visited nodes are solid indigo #4F46E5. The visited path is drawn as 3 px solid indigo segments with small filled heads between consecutive visited nodes. The visited region has a very pale #EEF2FF tint. Each panel includes a small queue widget: a white outlined rectangle with a thin indigo bar whose fill fraction indicates how much of the neighborhood was queued; the widget is schematic.
+
+SPATIAL LAYOUT — PRIVATE:
+Use 4% margins and two equal-width panels with a generous center gutter and a hairline divider. Each panel has a small local heading at the top, the same layer-0 mesh of about sixty nodes in the middle with the query cross at the same position, a queue widget in the upper-right corner of the mesh, and a two-line caption near the bottom. Leave a narrow footer for one note.
+Left panel: a short visited path of about six indigo nodes approaching the query cross, with a small tinted region.
+Right panel: a longer visited path of about twenty indigo nodes winding around the query cross, with a tinted region roughly four times the area. Keep paths clear of the queue widget.
+
+EXACT TEXT LABELS — PRIVATE:
+Left heading: "Narrow search", with monospace "ef_search = 40" beneath.
+Right heading: "Wide search", with monospace "ef_search = 400" beneath.
+In the top-left of each mesh, a small label "Layer 0".
+Beside the red cross in the left panel only: "query vector".
+Queue widget label, left: "candidate queue · 40"; right: "candidate queue · 400".
+Left caption, two lines: "Queue fills quickly; exploration stops early.", "Lower latency · lower recall".
+Right caption, two lines: "Larger queue keeps exploring the neighborhood.", "Higher latency · higher recall".
+
+VISUAL CONNECTIONS — PRIVATE:
+The only directed marks are the small heads between consecutive visited nodes along each path. Mesh edges have no heads. No arrows cross between panels or point at the queue widgets.
+
+CALLOUTS — PRIVATE:
+Footer, one quiet line: "Query-time setting · SET hnsw.ef_search = N · must be at least top_k".
+
+LEGEND — PRIVATE:
+Bottom-right, a small white outlined box with three entries: indigo dot "Visited node", red cross "Query vector", pale indigo "Explored region". No heading.
+
+FINAL CHECK — PRIVATE, DO NOT PRINT:
+Two panels, same mesh, same query position, visibly different path lengths and tinted areas. Visited counts are schematic and not printed as numbers. Do not claim a recall percentage or an exact multiple of nodes visited. No standalone title, large banner or rendering syntax.
+```
+
+---
+
+## HNSW-Post-Filtering.png
+
+**What it shows:** why a `WHERE` clause on an HNSW scan forces over-exploration. The index returns candidates in distance order regardless of book; the filter discards those from other books; the scan must expand outward to collect enough matches. The lower band gives the worst-case uniform-distribution estimate from the README: `00. New Spring` is 2.6% of rows, so about 38 candidates per match and about 1,920 candidates for `LIMIT 50`, while a single non-iterative pass with the default `ef_search = 40` collects at most 40 candidates. The estimate assumes the book's chunks are spread evenly through the space; the README notes that in practice a query about one book usually lands near that book's chunks, so the real count varies. The current image's line "The index never had a chance" is replaced with a factual statement.
+
+**Evidence:** README section "HNSW Index", the critical detail for filtered search; [pgvector filtering notes](https://github.com/pgvector/pgvector#filtering); the recorded `LIMIT 40` HNSW result of 18 rows in [the no-statistics plans](../results/eks-20261022-trap-no-stats.txt).
+
+**Prompt:**
+
+```text
+Create a polished technical mechanism diagram on pure white, 3:2 landscape at 3072 × 2048 or higher. Begin directly with the content. No standalone title, subtitle or empty title band. Instructions are private; print only the quoted labels below, once each except explicit repetitions.
+
+VISUAL STYLE — PRIVATE:
+Restrained engineering-whitepaper styling: thin outlines, pale fills, compact cards, no shadows, gradients or decoration. Inter-like sans-serif: semibold #0F172A section labels about 40 px, regular #475569 captions and arrow labels at least 30 px, card values semibold at least 34 px. Settings use readable monospace.
+Candidate nodes are small circles. Nodes that pass the book filter are solid indigo #4F46E5 with a tiny white check. Nodes that fail it are #CBD5E1 with a small grey cross. The query is a solid amber #B45309 circle at the center. Distance rings are thin dashed #94A3B8 circles. The expansion arrow is 4 px solid red #B91C1C. Cards: amber on #FFFBEB for the selectivity figure, red on #FFF1F2 for the required-candidates figure, slate on #F8FAFC for the single-pass figure.
+
+SPATIAL LAYOUT — PRIVATE:
+Use 4% margins. The left 60% of the canvas holds the mechanism: the amber query circle at the center of three concentric dashed rings. About 40 candidate nodes sit on and between the rings, denser near the center. Exactly four of them are indigo matches, placed one on the inner ring, one on the middle ring and two on the outer ring; all others are grey rejects. A single straight red arrow points radially outward, starting just outside the inner ring and ending just outside the outer ring, in the lower-right sector where no node sits on its path. It has one head at the outer end and no other heads, branches or curves. Two short slate leader lines with small labels point at one grey node and one indigo node.
+The right 40% holds a vertical stack of three cards, aligned to the rings' vertical extent, and a thin horizontal proportion bar above them. The proportion bar is a long grey #E2E8F0 rectangle with an indigo segment occupying 2.6% of its length at the left end. Leave a footer for one note and a compact legend.
+
+EXACT TEXT LABELS — PRIVATE:
+Above the rings, small local label: "HNSW candidates in distance order".
+Leader label at a grey node: "other book · discarded by filter".
+Leader label at an indigo node: "00. New Spring · kept".
+Beside the red arrow, label: "scan expands to replace discarded rows".
+Above the proportion bar: "00. New Spring share of the table".
+Below the proportion bar: "63,945 of 2,500,000 rows · 2.6%".
+Top card (amber): "Candidates per match", with "1 ÷ 0.026 ≈ 38" and "if the book were spread evenly".
+Middle card (red): "Candidates for LIMIT 50", with "50 × 38 ≈ 1,920" and "worst-case estimate".
+Bottom card (slate): "Single pass at default", with monospace "ef_search = 40" and "collects at most 40 candidates".
+
+VISUAL CONNECTIONS — PRIVATE:
+Exactly one directed arrow: the straight red expansion arrow with one filled head at its outer end. No curved or branching red lines. The two leader lines are thin slate with no heads. The dashed rings and the proportion bar are not connectors. No arrows between the mechanism and the cards.
+
+CALLOUTS — PRIVATE:
+Footer, one quiet line: "Queries about a book usually land near its chunks, so the real candidate count varies; the ratio is the principle.".
+
+LEGEND — PRIVATE:
+Bottom-right, a small white outlined box with three entries: amber dot "Query", indigo dot "Passes filter", grey dot "Discarded". No heading.
+
+FINAL CHECK — PRIVATE, DO NOT PRINT:
+One query, three dashed rings, exactly four indigo nodes among about forty (count them), one straight red arrow with one head, three cards, one proportion bar at 2.6%. The arithmetic reads 1 ÷ 0.026 ≈ 38 and 50 × 38 ≈ 1,920. The numbers are labelled as an estimate, not a measurement. Do not print "never had a chance" or any claim about latency. No standalone title, large banner or rendering syntax.
+```
+
+---
+
+## iterative_scan.png
+
+**What it shows:** the three values of `hnsw.iterative_scan` in pgvector 0.8.0 and later. `off` performs one traversal of up to `ef_search` candidates and may return fewer rows than `LIMIT` after filtering. `strict_order` resumes the scan in further batches and emits rows only in exact distance order. `relaxed_order` resumes too but may emit adjacent rows slightly out of distance order, which is faster. Resumption stops at `hnsw.max_scan_tuples` (default 20,000). Iterative scanning only matters when the planner has chosen the HNSW index. The current image has a duplicated word ("results results"), a large yellow banner and a title, all removed here.
+
+**Evidence:** [pgvector iterative index scans](https://github.com/pgvector/pgvector#iterative-index-scans), README section "Iterative index scans", and the benchmark's `strict_order` setting for filtered queries in [03_retrieval_asyncpg.py](../../src/pgvector/03_retrieval_asyncpg.py).
+
+**Prompt:**
+
+```text
+Create a polished three-column technical comparison on pure white, 3:2 landscape at 3072 × 2048 or higher. Begin directly with the columns. No standalone title, subtitle or empty title band. Instructions are private; print only the quoted labels below, once each except explicit repetitions.
+
+VISUAL STYLE — PRIVATE:
+Restrained engineering-whitepaper styling: compact cards, thin outlines, pale fills, modest uniform corners, no shadows, gradients or decoration. Inter-like sans-serif: semibold #0F172A column labels about 40 px, regular #475569 captions at least 30 px. Settings and SQL use readable monospace on #F8FAFC chips.
+Graph schematics: small nodes with thin #94A3B8 outlines joined by hairline #CBD5E1 edges with no heads; the query is a solid amber #B45309 circle; visited nodes are solid in the column's accent color; batch boundaries are dashed circles in the accent color. Column accents: slate #475569 on #F8FAFC for off, indigo #4F46E5 on #EEF2FF for strict_order, green #15803D on #F0FDF4 for relaxed_order. The shortfall value in the first column is red #B91C1C text.
+
+SPATIAL LAYOUT — PRIVATE:
+Use 4% margins and three equal columns separated by hairline dividers and generous gutters. Each column, top to bottom: a monospace mode chip, a graph schematic of about twenty nodes around a central amber query, a two-line schematic caption, a behavior card with three short lines, and a monospace SET chip. Corresponding elements align across the three columns. Leave a footer for one note.
+Column 1 schematic: one dashed slate circle around the query enclosing about six slate visited nodes. Nothing outside it is visited.
+Column 2 schematic: two concentric dashed indigo circles; about six indigo visited nodes inside the inner circle and about eight more between the circles, with one small indigo arrow from the inner circle to the outer labelled as below.
+Column 3 schematic: the same two concentric circles in green with the same visited counts, plus one tiny double-headed green arrow between two adjacent visited nodes in the outer band.
+
+EXACT TEXT LABELS — PRIVATE:
+Mode chips: "hnsw.iterative_scan = off", "hnsw.iterative_scan = strict_order", "hnsw.iterative_scan = relaxed_order".
+Column 1 caption: "Single traversal.", "Stops after ef_search candidates.".
+Column 2 caption: "Resumes in further batches.", "Rows emitted in exact distance order.".
+Column 3 caption: "Resumes in further batches.", "Adjacent rows may swap in distance order.".
+Column 2 arrow label: "resume".
+Column 3 double-arrow label: "may swap".
+Behavior card 1: "Default.", "Filtered queries can return fewer rows than LIMIT." with "fewer rows" in red, "No resumption.".
+Behavior card 2: "Exact ordering guaranteed.", "Extra work to confirm no closer unseen row.", "Used by this benchmark for filtered queries.".
+Behavior card 3: "Fastest iterative mode.", "Approximate order; fine for RAG retrieval.", "Best recall-to-latency ratio for filtered queries.".
+SET chips: "SET hnsw.iterative_scan = off;", "SET hnsw.iterative_scan = strict_order;", "SET hnsw.iterative_scan = relaxed_order;".
+
+VISUAL CONNECTIONS — PRIVATE:
+Exactly two small arrows: the indigo "resume" arrow in column 2 with one filled head, and the green double-headed "may swap" arrow in column 3. Graph edges have no heads. No arrows between columns or to the cards.
+
+CALLOUTS — PRIVATE:
+Footer, one quiet line: "Resumption stops at hnsw.max_scan_tuples (default 20,000) · applies only when the planner has chosen the HNSW index".
+
+LEGEND — PRIVATE:
+None; the column colors are explained by their chips.
+
+FINAL CHECK — PRIVATE, DO NOT PRINT:
+Three columns, three mode chips, three SET chips, one dashed circle in column 1 and two in each of columns 2 and 3. Exactly two small arrows in total. No duplicated words. Do not claim iterative scanning returns exactly LIMIT rows, guarantees exact recall, or changes the planner's plan choice. No standalone title, yellow banner or rendering syntax.
+```
+
+---
+
+## gin-index.png
+
+**What it shows:** how the GIN index on `to_tsvector('english', content)` is built and what it stores. Step 1 tokenizes each row into lexemes (stopwords removed, words stemmed). Step 2 inverts the mapping into a sorted lexeme list with a posting list of row IDs per lexeme. The index answers "which rows contain dragon" from the posting list (76,198 row IDs) but stores no term frequency, so `ts_rank()` must fetch and re-score every matching row. The three sample sentences and their lexemes are the ones quoted in the README text and must stay identical; posting lists are printed in ascending row-ID order, which is how GIN stores them. The current image's claim that this makes hybrid search "3–4× slower than vector search" is dropped; the measured comparison lives in the hybrid investigation section.
+
+**Evidence:** README section "GIN Index and Full-Text Search", [PostgreSQL GIN internals](https://www.postgresql.org/docs/18/gin-implementation.html), [text search ranking](https://www.postgresql.org/docs/18/textsearch-controls.html#TEXTSEARCH-RANKING), and the recorded 76,198-row `dragon` match in [hybrid component plans](../results/eks-20261022-hybrid-components.txt).
+
+**Prompt:**
+
+```text
+Create a polished technical data-structure diagram on pure white, 3:2 landscape at 3072 × 2048 or higher. Begin directly with the content. No standalone title, subtitle or empty title band. Instructions are private; print only the quoted labels below, once each except explicit repetitions.
+
+VISUAL STYLE — PRIVATE:
+Restrained engineering-whitepaper styling: compact cards, thin outlines, pale fills, modest uniform corners, no shadows, gradients or decoration. Inter-like sans-serif: semibold #0F172A section labels about 40 px, regular #475569 captions at least 30 px. Lexemes, row IDs and SQL use readable monospace at least 30 px.
+Row-content cards are slate on #F8FAFC. Lexeme cards are green #15803D on #F0FDF4. The inverted-index table has hairline #CBD5E1 rules; the "dragon" row is highlighted with a #FFF1F2 fill and red #B91C1C text. The two capability cards at the bottom are green on #F0FDF4 for what the index answers and red on #FFF1F2 for what it cannot. Small matching outline icons: text document, tokens, sorted list, check, cross.
+
+SPATIAL LAYOUT — PRIVATE:
+Use 4% margins. Top band: one monospace SQL chip spanning the width. Below it, the left 45% of the canvas holds Step 1: three row-content cards stacked on the left half of that area, each paired with a lexeme card to its right, and a small caption beneath. The right 55% holds Step 2: a two-column table with eight lexeme rows, a small heading, and a short note card to its right about the highlighted row. Across the bottom, two equal capability cards side by side. Leave a narrow footer for one note.
+
+EXACT TEXT LABELS — PRIVATE:
+SQL chip: "CREATE INDEX ON wot_chunks_2_5m USING gin (to_tsvector('english', content));".
+Step 1 heading: "1 · Tokenize at build time".
+Row card 1: "Row 4021", with "Rand drew on the One Power, the dragon symbol blazing…". Lexeme card 1: "rand · draw · power · dragon · symbol · blaze".
+Row card 2: "Row 4022", with "The dragon banner unfurled above the city gates…". Lexeme card 2: "dragon · banner · unfurl · above · citi · gate".
+Row card 3: "Row 9901", with "Moiraine spoke of the dragon reborn, the prophecies said…". Lexeme card 3: "moirain · spoke · dragon · reborn · prophecy".
+Step 1 caption: "Stopwords removed · words stemmed to lexemes".
+Step 2 heading: "2 · Invert: lexeme → row IDs".
+Table column headings: "Lexeme (sorted)" and "Posting list (row IDs, ascending)".
+Table rows, in order:
+"banner" | "4022, 7103, 12881, 34201, …"
+"blaze" | "891, 4021, 23445, 56012, …"
+"citi" | "4022, 5511, 8834, 19021, …"
+"dragon" | "312, 788, 1204, 4021, 4022, 9901, … (76,198 IDs)"
+"gate" | "4022, 6612, 14332, …"
+"moirain" | "2341, 9901, 18823, 45001, …"
+"power" | "783, 2211, 4021, 9034, …"
+"reborn" | "9901, 14523, 29834, 56712, …"
+Note card beside the table: "76,198 rows contain dragon", with "3% of 2.5M rows · found from the posting list".
+Left capability card: "Answers from the index", with "Which rows contain a lexeme?" and "@@ lookup → posting list of row IDs".
+Right capability card: "Not stored in the index", with "How often or how prominently it appears" and "ts_rank() must fetch and re-score every matching row".
+
+VISUAL CONNECTIONS — PRIVATE:
+Exactly four directed arrows, each with one small filled head and a short label on a white backing. Three thin 3 px slate arrows run from each row card to its lexeme card, the first labelled "to_tsvector" and the other two unlabelled repeats. One 4 px solid green arrow runs from the Step 1 area rightward to the table, labelled "build inverted index". No arrows to or from the capability cards or the note card.
+
+CALLOUTS — PRIVATE:
+Footer, one quiet line: "The posting list says which rows match; ranking them needs the row text.".
+
+LEGEND — PRIVATE:
+None.
+
+FINAL CHECK — PRIVATE, DO NOT PRINT:
+Three row cards, three lexeme cards, one eight-row table with "dragon" highlighted, one note card, two capability cards, four arrows. Lexeme strings match exactly. Posting lists are in ascending order. No speed multiple, no latency claim, no standalone title, yellow banner or rendering syntax.
+```
+
+---
+
+## planner-decision.png
+
+**What it shows:** the decision the planner makes before executing a filtered vector search. The estimated number of rows matching the filter feeds two cost estimates: the HNSW index scan with a post-filter, whose cost pgvector scales up as fewer matches are expected (more of the graph must be scanned to fill the `LIMIT`), and the B-tree bitmap scan with a brute-force distance sort, whose cost grows with the expected matches. The recorded totals for `00. New Spring` without statistics are 13,637.69 for HNSW at `LIMIT 40` and 13,557.94 for the bitmap plan at `LIMIT 41`. Replaces the "Query Planner Decision" Mermaid flowchart in the README and article; the Mermaid's "faster when few rows are expected to match" wording was inverted and is corrected here.
+
+**Evidence:** README section "The Query Planner and Cost Model", [recorded LIMIT 40 and 41 plans](../results/eks-20261022-trap-no-stats.txt), [pgvector cost estimation](https://github.com/pgvector/pgvector/blob/master/src/hnswscan.c), and [PostgreSQL planner cost constants](https://www.postgresql.org/docs/18/runtime-config-query.html#RUNTIME-CONFIG-QUERY-CONSTANTS).
+
+**Prompt:**
+
+```text
+Create a polished technical decision diagram on pure white, 3:2 landscape at 3072 × 2048 or higher. Begin directly with the content. No standalone title, subtitle or empty title band. Instructions are private; print only the quoted labels below, once each except explicit repetitions.
+
+VISUAL STYLE — PRIVATE:
+Restrained engineering-whitepaper styling: compact cards, small colored icon tabs, thin outlines, pale fills, modest uniform corners, no shadows, gradients or decoration. Inter-like sans-serif: semibold #0F172A card names about 40 px, regular #475569 metadata and arrow labels at least 30 px. SQL and settings use readable monospace.
+Slate on #F8FAFC for the query card; amber #B45309 on #FFFBEB for the estimate and the decision; indigo #4F46E5 on #EEF2FF for the HNSW strategy; green #15803D on #F0FDF4 for the B-tree strategy card; red #B91C1C on #FFF1F2 for the observed expensive outcome; indigo on #EEF2FF for the fast outcome. Small matching outline icons: query document, estimate chart, network graph, tree, scales, result rows.
+
+SPATIAL LAYOUT — PRIVATE:
+Use 4% margins. Top row: the query card at left and the estimate card at right, aligned. Middle row: two equal strategy cards side by side, each containing a name, a one-line description and a cost-rule line. Below them, one centered decision card shaped as a compact rounded rectangle, not a diamond. Bottom row: two outcome cards aligned under the strategy cards. Leave a footer for two notes and a compact legend. Keep gutters wide for arrow labels.
+
+EXACT TEXT LABELS — PRIVATE:
+Query card: "Filtered vector search", with monospace "WHERE metadata->>'book_name' = $book", "ORDER BY embedding <=> $1 LIMIT N".
+Estimate card: "Estimated matching rows", with "From expression statistics" and "Default 0.5% when none exist".
+Left strategy card (indigo): "A · HNSW index scan + post-filter", with "Approximate graph search, filter applied to candidates" and "Cost ∝ LIMIT ÷ expected matches: fewer expected matches → more graph to scan".
+Right strategy card (green): "B · B-tree bitmap scan + distance sort", with "Fetch every matching row, compute every distance, sort" and "Cost ∝ expected matches".
+Decision card (amber): "Compare estimated costs", with "Lowest total cost wins".
+Left outcome card (indigo): "HNSW chosen", with "Recorded: 1.5 ms".
+Right outcome card (red): "Bitmap plan chosen", with "Recorded: 358 ms".
+
+VISUAL CONNECTIONS — PRIVATE:
+Exactly seven directed arrows, each with one small filled head. Slate #64748B 3 px for planning links; indigo 4 px to the HNSW outcome; red 4 px to the bitmap outcome. Labels sit on white backings in the gaps.
+1. Query card rightward to Estimated matching rows, slate, label "estimate selectivity".
+2. Estimated matching rows down-left to strategy A, slate, label "cost A".
+3. Estimated matching rows down-right to strategy B, slate, label "cost B".
+4. Strategy A down to the decision card, slate, unlabelled.
+5. Strategy B down to the decision card, slate, unlabelled.
+6. Decision card down-left to HNSW chosen, indigo, label "estimate close to actual".
+7. Decision card down-right to Bitmap plan chosen, red, label "estimate far too low".
+
+CALLOUTS — PRIVATE:
+Footer-left, two quiet lines: "Recorded for 00. New Spring without statistics: estimate 12,500, actual 63,945.", "Total cost 13,637.69 for HNSW at LIMIT 40; 13,557.94 for the bitmap plan at LIMIT 41.".
+
+LEGEND — PRIVATE:
+Bottom-right, a small white outlined box with four swatches: amber "Estimate / decision", indigo "HNSW path", green "B-tree path", red "Observed expensive plan". No heading. Print every legend word in full; widen the box rather than truncating a label.
+
+FINAL CHECK — PRIVATE, DO NOT PRINT:
+Seven arrows, six cards plus one decision card. All four legend labels are complete words. Strategy A's cost rises when fewer matches are expected; strategy B's cost rises when more are expected. Do not print "FAST" or "SLOW" badges. Recorded figures keep their book and LIMIT context. No diamond, no standalone title, no rendering syntax.
+```
+
+---
+
+## limit-41-plan-steps.png
+
+**What it shows:** the four plan nodes PostgreSQL executed for `00. New Spring` at `LIMIT 41` without expression statistics, as a left-to-right step sequence with the recorded figures: bitmap index scan on the B-tree (63,945 row IDs, about 4 ms), bitmap heap scan (50,143 exact heap blocks, 305,980 buffer hits including out-of-line embeddings), sort by cosine distance over all 63,945 rows of 1,536 dimensions, then the limit. Total 358 ms warm. Replaces the "Catastrophic Plan (LIMIT 41)" Mermaid flowchart. `b-tree-index-and-bitmap-heap.png` explains the same plan's mechanics in depth; this figure is the compact step view used in the investigation narrative.
+
+**Evidence:** [recorded plan, section 3b](../results/eks-20261022-trap-no-stats.txt) and README section "The Catastrophic Path: LIMIT 41".
+
+**Prompt:**
+
+```text
+Create a polished technical step-sequence diagram on pure white, 3:2 landscape at 3072 × 2048 or higher. Begin directly with the content. No standalone title, subtitle or empty title band. Instructions are private; print only the quoted labels below, once each.
+
+VISUAL STYLE — PRIVATE:
+Restrained engineering-whitepaper styling: compact cards, small colored icon tabs, thin outlines, pale fills, modest uniform corners, no shadows, gradients or decoration. Inter-like sans-serif: semibold #0F172A step names about 40 px, regular #475569 detail lines at least 30 px, small numbered step tags in monospace. SQL uses readable monospace.
+Green #15803D on #F0FDF4 for the index scan; blue #2563EB on #EFF6FF for the heap scan; red #B91C1C on #FFF1F2 for the sort; slate on #F8FAFC for the limit and the query card. Small matching outline icons: tree, page grid, CPU, result rows.
+
+SPATIAL LAYOUT — PRIVATE:
+Use 4% margins. A compact query card spans the upper left. Below it, four equal step cards in one horizontal row with wide gutters, each with a step tag at the top-left, a name, and three detail lines. Beneath the row, one slim timing bar: a thin horizontal rectangle whose left 2% is green and the remainder red, with labels above its two parts. Leave a footer for one note and a compact legend.
+
+EXACT TEXT LABELS — PRIVATE:
+Query card, monospace, three lines: "WHERE metadata->>'book_name' = '00. New Spring'", "ORDER BY embedding <=> $1", "LIMIT 41".
+Step 1 (green): tag "1", name "Bitmap Index Scan", details "B-tree on metadata->>'book_name'", "63,945 matching row IDs", "about 4 ms".
+Step 2 (blue): tag "2", name "Bitmap Heap Scan", details "Fetch all 63,945 rows and their embeddings", "50,143 exact heap blocks", "305,980 buffer hits".
+Step 3 (red): tag "3", name "Sort by cosine distance", details "Distance for every one of 63,945 rows", "1,536 dimensions each", "Brute force, no index".
+Step 4 (slate): tag "4", name "Limit", details "Keep the nearest 41", "41 rows returned".
+Timing bar left label: "index scan · ~4 ms". Timing bar right label: "heap scan + sort · ~350 ms".
+
+VISUAL CONNECTIONS — PRIVATE:
+Exactly four directed arrows, each with one small filled head and a short label on a white backing in the gutter. The arrow labels are only the quoted words; never print a line width, pixel value or percentage. A thin solid slate arrow from the query card down to step 1, label "chosen plan". A medium solid slate arrow from step 1 to step 2, label "row IDs". A medium solid slate arrow from step 2 to step 3, label "rows + embeddings". A medium solid red arrow from step 3 to step 4, label "sorted rows". No arrows to the timing bar. The timing bar carries only its two quoted labels; do not print its proportions.
+
+CALLOUTS — PRIVATE:
+Footer-left, one quiet line: "Total 358 ms, warm cache, second run · planner expected 12,500 matches".
+
+LEGEND — PRIVATE:
+Bottom-right, a small white outlined box with three swatches: green "Index lookup", blue "Heap access", red "Distance + sort". No heading.
+
+FINAL CHECK — PRIVATE, DO NOT PRINT:
+One query card, four step cards, four arrows, one timing bar. No pixel values or percentages are printed anywhere. Buffer hits are not described as unique pages. Only the recorded index-scan time and the combined heap-scan-plus-sort time appear; no invented per-step durations. No standalone title, no "catastrophic" wording, no rendering syntax.
+```
+
+---
+
+## text-search-cte-steps.png
+
+**What it shows:** the plan PostgreSQL executed for the hybrid query's text-search CTE with keyword `dragon` and `LIMIT 20`: GIN bitmap index scan (76,198 row IDs, about 14 ms), parallel bitmap heap scan across four workers plus the leader (about 15,240 rows and about 11,500 to 12,000 heap blocks per process), `ts_rank()` computed for every fetched row, a per-process sort of its scored rows, then Gather Merge, `ROW_NUMBER` and the limit. Total 596 ms. Replaces the "Text Search CTE Execution" Mermaid flowchart.
+
+**Evidence:** [recorded hybrid component plans](../results/eks-20261022-hybrid-components.txt), README section "What the Text Search Plan Reveals", and [diagnose_hybrid_components.sql](../../scripts/diagnose_hybrid_components.sql).
+
+**Prompt:**
+
+```text
+Create a polished technical step-sequence diagram on pure white, 3:2 landscape at 3072 × 2048 or higher. Begin directly with the content. No standalone title, subtitle or empty title band. Instructions are private; print only the quoted labels below, once each except explicit repetitions.
+
+VISUAL STYLE — PRIVATE:
+Restrained engineering-whitepaper styling: compact cards, small colored icon tabs, thin outlines, pale fills, modest uniform corners, no shadows, gradients or decoration. Inter-like sans-serif: semibold #0F172A step names about 40 px, regular #475569 detail lines at least 30 px, small numbered step tags in monospace. SQL uses readable monospace.
+Green #15803D on #F0FDF4 for the GIN index scan; red #B91C1C on #FFF1F2 for the heap scan and the ranking step, which are the observed expensive steps; blue #2563EB on #EFF6FF for the per-process sort; slate on #F8FAFC for the query card and the merge step. Small matching outline icons: sorted list, page grid, CPU, ordered list, merged streams.
+
+SPATIAL LAYOUT — PRIVATE:
+Use 4% margins. A compact query card spans the upper left. Below it, five step cards in one horizontal row with wide gutters, each with a step tag, a name and three detail lines. Steps 2, 3 and 4 sit inside one faint dashed slate boundary with a small label, marking the parallel section; steps 1 and 5 sit outside it. Beneath the row, one slim timing bar: a thin horizontal rectangle whose left 3% is green and the remainder red, with labels above its two parts. Leave a footer for one note and a compact legend.
+
+EXACT TEXT LABELS — PRIVATE:
+Query card, monospace, two lines: "WHERE to_tsvector('english', content) @@ plainto_tsquery('english', 'dragon')", "ORDER BY ts_rank(...) DESC LIMIT 20".
+Parallel boundary label: "4 workers + leader".
+Step 1 (green): tag "1", name "GIN Bitmap Index Scan", details "Posting list for dragon", "76,198 matching row IDs", "about 14 ms".
+Step 2 (red): tag "2", name "Parallel Bitmap Heap Scan", details "Fetch all 76,198 rows", "about 15,240 rows per process", "about 12,000 heap blocks per process".
+Step 3 (red): tag "3", name "ts_rank() per row", details "Re-tokenize content at query time", "Score every fetched row", "Frequency is not in the index".
+Step 4 (blue): tag "4", name "Sort per process", details "Order its scored rows by rank", "quicksort, under 1 MB each".
+Step 5 (slate): tag "5", name "Gather Merge + ROW_NUMBER", details "Merge the sorted streams", "Return the top 20".
+Timing bar left label: "index scan · ~14 ms". Timing bar right label: "heap scan + ranking + sort · ~580 ms".
+
+VISUAL CONNECTIONS — PRIVATE:
+Exactly five directed arrows, each with one small filled head and a short label on a white backing in the gutter. The arrow labels are only the quoted words; never print a line width, pixel value or percentage. A thin solid slate arrow from the query card down to step 1, label "plan". A medium solid slate arrow from step 1 to step 2, label "row IDs". A medium solid red arrow from step 2 to step 3, label "rows"; a medium solid red arrow from step 3 to step 4, label "scored rows"; a medium solid slate arrow from step 4 to step 5, label "sorted streams". No arrows to the timing bar or the boundary. The timing bar carries only its two quoted labels.
+
+CALLOUTS — PRIVATE:
+Footer-left, one quiet line: "Total 596 ms, warm cache · the vector CTE of the same hybrid query took about 1 ms".
+
+LEGEND — PRIVATE:
+Bottom-right, a small white outlined box with three swatches: green "Index lookup", red "Observed expensive steps", blue "Sort". No heading.
+
+FINAL CHECK — PRIVATE, DO NOT PRINT:
+One query card, five step cards, one dashed parallel boundary around steps 2 to 4, five arrows, one timing bar. Per-process figures are labelled as approximate. Only the recorded index-scan time and the combined remainder appear. No standalone title, no rendering syntax.
+```
+
+---
+
+## li-architecture.png (LinkedIn, 3:4)
 
 **What it shows:** a compact logical overview of the same deployment, with the staging/cache prerequisite explicit and SQL, management and scraping distinguished. It deliberately omits node boxes, resource allocations and namespaces to preserve readability at phone width. Save to `doc/linkedin/diagrams/li-architecture.png`.
 
@@ -502,7 +1019,7 @@ Two external cards, six internal cards, one boundary, eight arrows. Staging/cach
 
 ---
 
-## li-planner-switch.png (LinkedIn, 4:5)
+## li-planner-switch.png (LinkedIn, 3:4)
 
 **What it shows:** the same `LIMIT 41` query and session settings before and after expression statistics are available. The diagnostic used `ef_search=40` and iterative scans off. Its plans returned 41 rows via bitmap-and-sort before `ANALYZE`, but only 18 via HNSW afterward. This makes the distinction between plan selection and completeness visible; the earlier “stops after 41 matches” caption did not match this evidence. Save to `doc/linkedin/diagrams/li-planner-switch.png`.
 
